@@ -1,0 +1,81 @@
+# ==============================================================================
+# MiniCert: Git Ignore Rules
+# Designed for Python 3.11, PyTorch, Streamlit, and Virtual Environments
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / Packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE and Editor Directories / Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PyTorch / Machine Learning Artifacts & Checkpoints
+*.pt
+*.pth
+*.pwf
+*.onnx
+checkpoints/
+saved_models/
+
+# Datasets and Local Benchmarks
+data/
+datasets/
+
+# Logs, Visualizations, and Experiment Outputs
+logs/
+runs/
+*.log
+results/
+
+# Pytest / Test Coverage / Profiling
+.pytest_cache/
+.coverage
+htmlcov/
+.hypothesis/
+
+# Streamlit Local Cache & Runtime
+.streamlit/
+
+# OS-generated Files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+

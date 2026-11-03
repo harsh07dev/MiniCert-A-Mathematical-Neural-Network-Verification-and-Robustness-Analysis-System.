@@ -1,0 +1,20 @@
+# ==============================================================================
+# MiniCert: Mathematical Neural Network Verification & Robustness Analysis
+# Python 3.11 Dependencies Specification
+# ==============================================================================
+
+# Core Deep Learning & Computer Vision
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Scientific Computing & Linear Programming
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Visualization & Interactive Dashboards
+matplotlib>=3.8.0
+streamlit>=1.30.0
+
+# Testing & Quality Assurance
+pytest>=7.4.0
+
