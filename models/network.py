@@ -14,6 +14,35 @@ import torch
 import torch.nn as nn
 
 
+class MiniCertNet(nn.Module):
+    """Reference fully connected network for 28x28 grayscale images.
+
+    The sequential container exposes only Linear and ReLU operations so that
+    verification engines can directly extract parameters and activations.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(784, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            nn.Linear(32, 10),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return 10 raw logits for flattened or unflattened image batches.
+
+        Args:
+            x: Tensor of shape (batch_size, 784) or (batch_size, 1, 28, 28).
+
+        Returns:
+            Tensor of raw logits with shape (batch_size, 10).
+        """
+        return self.network(x.flatten(start_dim=1))
+
+
 class FCNet(nn.Module):
     """
     Fully Connected Feedforward Neural Network (Multi-Layer Perceptron).
