@@ -59,4 +59,4 @@ The documentation distinguishes the implemented architecture from future design 
 
 ## Current status
 
-MiniCert now has a tested, readable reference network and mathematical documentation that connects its concrete PyTorch computation to future abstract-interpretation workflows. No training pipeline or verification engine has been introduced as part of these tasks.
+MiniCert now has a tested, readable reference network and mathematical documentation that connects its concrete PyTorch computation to future abstract-interpretation workflows. The runnable MNIST workflow in `models/train_mnist.py` downloads the dataset, trains `MiniCertNet`, evaluates test accuracy, saves `saved_model.pth`, verifies checkpoint reload and predictions, and generates `docs/training_report.md`. No verification engine has been introduced.
