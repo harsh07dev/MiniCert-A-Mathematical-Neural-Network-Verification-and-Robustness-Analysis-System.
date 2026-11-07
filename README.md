@@ -169,9 +169,9 @@ python -c "import torch, torchvision, numpy, scipy, matplotlib, streamlit, pytes
 python -c "from models import FCNet, extract_layer_parameters; model = FCNet(input_dim=4, hidden_dims=[16, 8], output_dim=3); params = extract_layer_parameters(model); print('FCNet initialized with', len(params), 'linear layers.'); print('Layer 0 weight shape:', params[0][0].shape)"
 ```
 
-### 3. Smoke Test: Abstract Interval Bound Propagation
+### 3. Smoke Test: Scalar Interval Arithmetic
 ```bash
-python -c "import torch; from abstract_domain import Interval; x = torch.tensor([1.0, -2.0]); box = Interval.from_center_and_epsilon(x, epsilon=0.5); print('Input Box:', box); relu_box = box.relu(); print('After ReLU:', relu_box)"
+python -c "from abstract_domain import Interval; interval = Interval(-1.0, 2.0); print('Input Interval:', interval); print('After ReLU:', interval.relu()); print('Width:', interval.width)"
 ```
 
 ### 4. Execute Test Suite
