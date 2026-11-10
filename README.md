@@ -25,14 +25,20 @@ The repository is organized into isolated, highly cohesive packages to facilitat
 MiniCert/
 ├── models/                     # Neural network definitions, training, and parameter serialization
 │   ├── __init__.py
-│   ├── network.py              # Modular fully-connected PyTorch architectures (FCNet)
+│   ├── network.py              # MiniCertNet & modular FCNet PyTorch architectures
 │   ├── train.py                # Standard training and evaluation routines
-│   └── model_loader.py         # Checkpointing and weight/bias matrix extraction
+│   ├── train_mnist.py          # MNIST training CLI with checkpoint reload validation
+│   └── model_loader.py         # Strict checkpointing and float64 mathematical extraction
 ├── abstract_domain/            # Abstract Interpretation domain representations
 │   ├── __init__.py
-│   └── interval.py             # Multi-dimensional Box/Interval domain and sound transformers
+│   ├── interval.py             # Scalar interval domain with extended-real bound policy
+│   ├── box.py                  # Vector Box (hyper-rectangle) domain + sound IBP transformers
+│   └── propagation.py          # Network-level Interval Bound Propagation (IBP)
 ├── verification/               # Robustness specification, LP relaxations, and verification engine
-│   └── __init__.py             # Verification contracts, status enums, and result types
+│   ├── __init__.py             # Verification contracts, status enums, and result types
+│   ├── regions.py              # L-infinity input perturbation regions (InputRegion)
+│   ├── safety.py               # Safety checking over abstract output bounds
+│   └── pipeline.py             # End-to-end verify_robustness() orchestration
 ├── refinement/                 # Abstraction refinement and Branch-and-Bound (BaB) search
 │   └── __init__.py
 ├── dashboard/                  # Streamlit-based interactive exploration UI
@@ -50,12 +56,12 @@ MiniCert/
 
 | Module | Primary Responsibility | Interface Deliverable |
 | :--- | :--- | :--- |
-| `models/` | PyTorch architectures with accessible linear layers and activation functions; weight/bias extraction. | `FCNet`, `extract_layer_parameters()` |
-| `abstract_domain/` | Mathematical Box domain $[l, u]$ with sound affine ($W^+ l + W^- u + b$) and ReLU transformers. | `Interval` class |
-| `verification/` | LP formulations (SciPy `linprog`), property encoding, and verification status outcomes. | `VerificationResult`, `VerificationStatus` |
-| `refinement/` | Branch-and-Bound search splitting uncertain neurons ($l_i < 0 < u_i$) or input intervals. | Splitting strategies & BaB search queue |
-| `dashboard/` | Interactive Streamlit GUI for bound visualization, $\epsilon$-tuning, and adversarial exploration. | Interactive web app |
-| `experiments/` | Benchmarking runtime vs. depth/width, certified accuracy vs. $\epsilon$. | Reproducible scripts & figures |
+| `models/` | PyTorch architectures with accessible linear layers and activation functions; strict checkpoint loading and float64 mathematical extraction. | `MiniCertNet`, `FCNet`, `extract_network()`, `extract_layer_parameters()` |
+| `abstract_domain/` | Scalar `Interval` and vector `Box` domains with sound affine ($W^+ l + W^- u + b$) and ReLU transformers, plus network-level IBP. | `Interval`, `Box`, `propagate_network()` |
+| `verification/` | L-infinity perturbation regions, safety checking, immutable result records, and end-to-end orchestration. | `InputRegion`, `SafetyChecker`, `VerificationResult`, `verify_robustness()` |
+| `refinement/` | Branch-and-Bound search splitting uncertain neurons ($l_i < 0 < u_i$) or input intervals. | Splitting strategies & BaB search queue *(planned)* |
+| `dashboard/` | Interactive Streamlit GUI for bound visualization, $\epsilon$-tuning, and adversarial exploration. | Interactive web app *(planned)* |
+| `experiments/` | Benchmarking runtime vs. depth/width, certified accuracy vs. $\epsilon$. | Reproducible scripts & figures *(planned)* |
 | `tests/` | Pytest suite validating mathematical invariants, arithmetic soundness, and model compatibility. | Test cases |
 
 ---
@@ -105,6 +111,19 @@ $$\forall \mathbf{x} \in [\mathbf{l}, \mathbf{u}], \quad (\mathbf{W}\mathbf{x} +
 Because $\text{ReLU}(z) = \max(0, z)$ is monotonically non-decreasing:
 $$\mathbf{l}_{out} = \max(0, \mathbf{l})$$
 $$\mathbf{u}_{out} = \max(0, \mathbf{u})$$
+
+### 4.4 Network-Level Interval Bound Propagation
+`propagate_network()` walks an extracted `MathematicalNetwork` layer by layer in exact execution order, applying the affine transformer to each `LinearLayer` and the ReLU transformer to each `ReLULayer`, producing a single certified output `Box` bounding the network's reachable set over the input region.
+
+### 4.5 Safety Checking & Certification Margin
+Given a target class $t$ and the certified output bounds, the `SafetyChecker` certifies strict class dominance over every competitor $j \neq t$:
+$$\forall j \neq t: \quad \mathbf{l}_t > \mathbf{u}_j$$
+
+The **verification margin** is defined as $\text{margin} = \mathbf{l}_t - \max_{j \neq t} \mathbf{u}_j$:
+- `CERTIFIED` — margin is strictly positive.
+- `INCONCLUSIVE` — margin is non-positive (bounds overlap); this never reports a violation, since overlapping bounds do not prove the network is unsafe.
+
+**Note on soundness:** float64 bounds without outward (directed) rounding do not establish a machine-checked mathematical certificate. Certification is only as sound as the upstream bound computation.
 
 ---
 
@@ -166,7 +185,7 @@ python -c "import torch, torchvision, numpy, scipy, matplotlib, streamlit, pytes
 
 ### 2. Smoke Test: Model Creation and Parameter Extraction
 ```bash
-python -c "from models import FCNet, extract_layer_parameters; model = FCNet(input_dim=4, hidden_dims=[16, 8], output_dim=3); params = extract_layer_parameters(model); print('FCNet initialized with', len(params), 'linear layers.'); print('Layer 0 weight shape:', params[0][0].shape)"
+python -c "from models.network import MiniCertNet; from models.model_loader import extract_network; model = MiniCertNet(); net = extract_network(model); print('Extracted network:', net.input_features, '->', net.output_features, 'with', len(net.layers), 'layers.')"
 ```
 
 ### 3. Smoke Test: Scalar Interval Arithmetic
@@ -174,7 +193,17 @@ python -c "from models import FCNet, extract_layer_parameters; model = FCNet(inp
 python -c "from abstract_domain import Interval; interval = Interval(-1.0, 2.0); print('Input Interval:', interval); print('After ReLU:', interval.relu()); print('Width:', interval.width)"
 ```
 
-### 4. Execute Test Suite
+### 4. Smoke Test: Vector Box Domain & Interval Bound Propagation
+```bash
+python -c "import numpy as np; from abstract_domain.box import Box; box = Box(np.array([-1.0, 2.0]), np.array([3.0, 5.0])); out = box.affine(np.array([[1.5, -2.0]]), np.array([0.5])); print('Input Box:', box); print('After affine:', out)"
+```
+
+### 5. Smoke Test: End-to-End Robustness Verification
+```bash
+python -c "import numpy as np; from verification.pipeline import verify_robustness; from verification.regions import InputRegion; from models.model_loader import LinearLayer, MathematicalNetwork; w = np.array([[1.0, -1.0], [-1.0, 1.0]]); net = MathematicalNetwork(layers=(LinearLayer(0, w, np.zeros(2), 2, 2),), input_features=2, output_features=2, source_model='TwoClass'); result = verify_robustness(net, InputRegion(np.array([0.5, 0.1]), 0.05), target_class=0); print(result)"
+```
+
+### 6. Execute Test Suite
 ```bash
 pytest tests/
 ```
@@ -183,15 +212,20 @@ pytest tests/
 
 ## 7. Modular Development Roadmap
 
-1. **Phase 1: Foundation & Abstract Domain (Current)**
+1. **Phase 1: Foundation & Abstract Domain (Done)**
    - Initialized modular architecture and development contracts.
-   - Implemented `FCNet` model and layer extraction utilities (`models/`).
-   - Implemented Box domain with sound affine and ReLU transformers (`abstract_domain/`).
-2. **Phase 2: LP Relaxation & Verifier Integration (Upcoming - Developer 2)**
+   - Implemented `MiniCertNet` and generic `FCNet` model + strict layer extraction (`models/`).
+   - Implemented scalar `Interval` and vector `Box` domains with sound affine and ReLU transformers (`abstract_domain/`).
+   - Trained reference network to **96.44% MNIST test accuracy** and validated checkpoint reload.
+2. **Phase 2: IBP Verifier Integration (Done)**
+   - Implemented network-level Interval Bound Propagation (`propagate_network`).
+   - Implemented `InputRegion` (L-infinity perturbation ball), `SafetyChecker`, and `VerificationResult`.
+   - Implemented end-to-end `verify_robustness()` returning `CERTIFIED` / `INCONCLUSIVE`.
+   - 337 automated tests passing.
+3. **Phase 3: LP Relaxation & Refinement (Upcoming)**
    - Formulate Planet linear relaxation for unstable neurons ($l_i < 0 < u_i$).
    - Implement SciPy LP solver integration for margin optimization.
-3. **Phase 3: Refinement & Branch-and-Bound**
-   - Implement bisection strategies for ambiguous neurons to resolve `UNKNOWN` verdicts.
+   - Implement Branch-and-Bound (BaB) splitting heuristics to resolve `INCONCLUSIVE` verdicts.
 4. **Phase 4: Streamlit Dashboard & Empirical Evaluation**
    - Interactive GUI for real-time reachability exploration.
    - Comprehensive benchmark evaluation across perturbation budgets ($\epsilon$).
