@@ -15,7 +15,7 @@ def test_certified_when_target_lower_exceeds_all_competitor_uppers() -> None:
     assert result.target_lower_bound == 0.5
     assert result.max_competitor_upper_bound == 0.2
     assert result.verification_margin == pytest.approx(0.3)
-    assert result.perturbation_radius is None
+    assert result.perturbation_epsilon is None
     assert "strictly exceeds" in result.explanation
 
 
