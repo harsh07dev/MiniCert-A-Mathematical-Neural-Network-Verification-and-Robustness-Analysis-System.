@@ -16,6 +16,8 @@ Assigned Developer:
 """
 
 from abstract_domain.interval import Interval
+from abstract_domain.box import Box
+from abstract_domain.propagation import propagate_network
 
-__all__ = ["Interval"]
+__all__ = ["Interval", "Box", "propagate_network"]
 
