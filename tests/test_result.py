@@ -317,6 +317,10 @@ def test_package_exports_only_the_public_contract() -> None:
         "LPProblem",
         "VariableLayout",
         "build_lp_problem",
+        "BoundValidationStatus",
+        "LPSolverResult",
+        "LPSolverStatus",
+        "solve_lp",
     }
 
 

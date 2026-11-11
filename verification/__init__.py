@@ -199,6 +199,12 @@ from verification.lp import (
     VariableLayout,
     build_lp_problem,
 )
+from verification.lp_solver import (
+    BoundValidationStatus,
+    LPSolverResult,
+    LPSolverStatus,
+    solve_lp,
+)
 
 __all__ = [
     "VerificationStatus",
@@ -207,5 +213,9 @@ __all__ = [
     "LPProblem",
     "VariableLayout",
     "build_lp_problem",
+    "BoundValidationStatus",
+    "LPSolverResult",
+    "LPSolverStatus",
+    "solve_lp",
 ]
 
