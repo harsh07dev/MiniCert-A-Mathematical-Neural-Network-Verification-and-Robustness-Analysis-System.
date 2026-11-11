@@ -24,6 +24,7 @@ from abstract_domain.bounds import (
     RefinedBounds,
 )
 from abstract_domain.propagation import get_intermediate_bounds, propagate_network
+from abstract_domain.refinement import propagate_with_refinements
 
 __all__ = [
     "Interval",
@@ -34,5 +35,6 @@ __all__ = [
     "RefinedBounds",
     "propagate_network",
     "get_intermediate_bounds",
+    "propagate_with_refinements",
 ]
 
