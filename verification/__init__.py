@@ -205,6 +205,12 @@ from verification.lp_solver import (
     LPSolverStatus,
     solve_lp,
 )
+from verification.refinement import (
+    NeuronRefinementOutcome,
+    RefinementResult,
+    RefinementStatus,
+    refine_neuron_bounds,
+)
 
 __all__ = [
     "VerificationStatus",
@@ -217,5 +223,9 @@ __all__ = [
     "LPSolverResult",
     "LPSolverStatus",
     "solve_lp",
+    "NeuronRefinementOutcome",
+    "RefinementResult",
+    "RefinementStatus",
+    "refine_neuron_bounds",
 ]
 
