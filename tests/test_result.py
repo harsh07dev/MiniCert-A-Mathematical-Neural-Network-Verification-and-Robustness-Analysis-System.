@@ -325,6 +325,9 @@ def test_package_exports_only_the_public_contract() -> None:
         "RefinementResult",
         "RefinementStatus",
         "refine_neuron_bounds",
+        "RefinedVerificationResult",
+        "select_refinement_targets",
+        "verify_robustness_refined",
     }
 
 

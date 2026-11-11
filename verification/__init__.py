@@ -211,6 +211,11 @@ from verification.refinement import (
     RefinementStatus,
     refine_neuron_bounds,
 )
+from verification.integration import (
+    RefinedVerificationResult,
+    select_refinement_targets,
+    verify_robustness_refined,
+)
 
 __all__ = [
     "VerificationStatus",
@@ -227,5 +232,8 @@ __all__ = [
     "RefinementResult",
     "RefinementStatus",
     "refine_neuron_bounds",
+    "RefinedVerificationResult",
+    "select_refinement_targets",
+    "verify_robustness_refined",
 ]
 
