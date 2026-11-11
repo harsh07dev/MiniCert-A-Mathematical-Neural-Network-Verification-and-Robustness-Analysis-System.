@@ -310,7 +310,14 @@ def test_status_enum_has_exactly_two_members() -> None:
 def test_package_exports_only_the_public_contract() -> None:
     import verification
 
-    assert set(verification.__all__) == {"VerificationStatus", "VerificationResult"}
+    assert set(verification.__all__) == {
+        "VerificationStatus",
+        "VerificationResult",
+        "LPConstraintBuilder",
+        "LPProblem",
+        "VariableLayout",
+        "build_lp_problem",
+    }
 
 
 def test_results_with_identical_fields_are_equal() -> None:

@@ -193,9 +193,19 @@ from verification.refinement_validation import (
     sample_region_inputs,
     validate_refined_bounds_empirically,
 )
+from verification.lp import (
+    LPConstraintBuilder,
+    LPProblem,
+    VariableLayout,
+    build_lp_problem,
+)
 
 __all__ = [
     "VerificationStatus",
     "VerificationResult",
+    "LPConstraintBuilder",
+    "LPProblem",
+    "VariableLayout",
+    "build_lp_problem",
 ]
 
