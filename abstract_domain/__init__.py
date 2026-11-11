@@ -17,7 +17,24 @@ Assigned Developer:
 
 from abstract_domain.interval import Interval
 from abstract_domain.box import Box
-from abstract_domain.propagation import propagate_network
+from abstract_domain.bounds import (
+    IntermediateBounds,
+    LayerBounds,
+    NeuronRef,
+    RefinedBounds,
+)
+from abstract_domain.propagation import get_intermediate_bounds, propagate_network
+from abstract_domain.refinement import propagate_with_refinements
 
-__all__ = ["Interval", "Box", "propagate_network"]
+__all__ = [
+    "Interval",
+    "Box",
+    "LayerBounds",
+    "IntermediateBounds",
+    "NeuronRef",
+    "RefinedBounds",
+    "propagate_network",
+    "get_intermediate_bounds",
+    "propagate_with_refinements",
+]
 

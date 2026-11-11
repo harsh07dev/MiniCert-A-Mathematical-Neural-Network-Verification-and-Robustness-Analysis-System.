@@ -188,6 +188,12 @@ class VerificationResult:
         )
 
 
+from verification.refinement_validation import (
+    evaluate_intermediate_activations,
+    sample_region_inputs,
+    validate_refined_bounds_empirically,
+)
+
 __all__ = [
     "VerificationStatus",
     "VerificationResult",
