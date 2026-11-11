@@ -193,9 +193,47 @@ from verification.refinement_validation import (
     sample_region_inputs,
     validate_refined_bounds_empirically,
 )
+from verification.lp import (
+    LPConstraintBuilder,
+    LPProblem,
+    VariableLayout,
+    build_lp_problem,
+)
+from verification.lp_solver import (
+    BoundValidationStatus,
+    LPSolverResult,
+    LPSolverStatus,
+    solve_lp,
+)
+from verification.refinement import (
+    NeuronRefinementOutcome,
+    RefinementResult,
+    RefinementStatus,
+    refine_neuron_bounds,
+)
+from verification.integration import (
+    RefinedVerificationResult,
+    select_refinement_targets,
+    verify_robustness_refined,
+)
 
 __all__ = [
     "VerificationStatus",
     "VerificationResult",
+    "LPConstraintBuilder",
+    "LPProblem",
+    "VariableLayout",
+    "build_lp_problem",
+    "BoundValidationStatus",
+    "LPSolverResult",
+    "LPSolverStatus",
+    "solve_lp",
+    "NeuronRefinementOutcome",
+    "RefinementResult",
+    "RefinementStatus",
+    "refine_neuron_bounds",
+    "RefinedVerificationResult",
+    "select_refinement_targets",
+    "verify_robustness_refined",
 ]
 
