@@ -27,6 +27,8 @@ from verification.lp_solver import (
     BoundValidationStatus,
     LPSolverResult,
     LPSolverStatus,
+    _duality_gap_diagnostics,
+    _primal_residual_diagnostics,
     solve_lp,
 )
 
@@ -671,3 +673,449 @@ def _design_box():
     from abstract_domain.box import Box
 
     return Box(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+
+
+# --------------------------------------------------------------------------
+# hardened numerical validation (large-scale & execution-time contracts)
+# --------------------------------------------------------------------------
+
+def test_large_dual_objective_rejects_positive_inequality_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Exact stationarity (0), zero primal residual, zero duality gap, and large
+    # dual objective 1e10, yet y[1] = +0.01 violates y <= 0.
+    problem_large_rhs = _make_problem(
+        a_ub=[[0.0, -1.0], [0.0, -1.0]],
+        b_ub=[-1e10, -1e10],
+    )
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1e10],
+                status=0,
+                fun=1e10,
+                y=[-1.01, 0.01],
+                lam_lb=[0.0, 0.0],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    res_rhs = solve_lp(problem_large_rhs, [0.0, 1.0])
+    assert res_rhs.status is OPTIMAL
+    assert res_rhs.validation_status is UNVALIDATED
+    assert res_rhs.is_certified is False
+    assert res_rhs.certified_bound is None
+    assert res_rhs.max_dual_residual > 1e-8
+    assert "inequality multiplier sign violation" in res_rhs.message
+
+    # Also verify large primal objective c = [0, 1e10] cannot mask a substantial
+    # absolute sign violation (+0.01) via ||y||_inf scaling.
+    problem_large_c = _make_problem(
+        a_ub=[[0.0, -1.0], [0.0, -1.0]],
+        b_ub=[-1.0, -1.0],
+    )
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1.0],
+                status=0,
+                fun=1e10,
+                y=[-(1e10 + 0.01), 0.01],
+                lam_lb=[0.0, 0.0],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    res_c = solve_lp(problem_large_c, [0.0, 1e10])
+    assert res_c.validation_status is UNVALIDATED
+    assert res_c.certified_bound is None
+    assert res_c.max_dual_residual > 1e-8
+
+
+def test_large_dual_objective_rejects_negative_lower_bound_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Exact stationarity and zero gap at dual = 1e10, with lambda_lb[1] = -0.01 < 0.
+    problem = _make_problem(
+        a_ub=[[0.0, -1.0]],
+        b_ub=[-1e10],
+        bounds=[(None, None), (1e10, None)],
+    )
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1e10],
+                status=0,
+                fun=1e10,
+                y=[-1.01],
+                lam_lb=[0.0, -0.01],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    result = solve_lp(problem, [0.0, 1.0])
+
+    assert result.status is OPTIMAL
+    assert result.validation_status is UNVALIDATED
+    assert result.is_certified is False
+    assert result.certified_bound is None
+    assert result.max_dual_residual > 1e-8
+    assert "lower-bound multiplier sign violation" in result.message
+
+    # Ensure huge y scale does not dilute an independent lambda_lb check.
+    problem_huge_y = _make_problem(
+        a_ub=[[0.0, -1.0]],
+        b_ub=[-1.0],
+        bounds=[(None, None), (1.0, None)],
+    )
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1.0],
+                status=0,
+                fun=1e10,
+                y=[-(1e10 + 0.01)],
+                lam_lb=[0.0, -0.01],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    res_indep = solve_lp(problem_huge_y, [0.0, 1e10])
+    assert res_indep.validation_status is UNVALIDATED
+    assert res_indep.certified_bound is None
+    assert res_indep.max_dual_residual > 1e-8
+
+
+def test_large_dual_objective_rejects_positive_upper_bound_multiplier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Maximization of z0 <= 1e10 (dual = +1e10) with invalid lambda_ub[1] = +0.01.
+    problem = _make_problem(
+        a_ub=[[0.0, 1.0]],
+        b_ub=[1e10],
+        bounds=[(None, None), (None, 1e10)],
+    )
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1e10],
+                status=0,
+                fun=-1e10,
+                y=[-1.01],
+                lam_lb=[0.0, 0.0],
+                lam_ub=[0.0, 0.01],
+            )
+        ],
+    )
+    result = solve_lp(problem, [0.0, 1.0], maximize=True)
+
+    assert result.status is OPTIMAL
+    assert result.validation_status is UNVALIDATED
+    assert result.is_certified is False
+    assert result.certified_bound is None
+    assert result.max_dual_residual > 1e-8
+    assert "upper-bound multiplier sign violation" in result.message
+
+
+def test_valid_dual_multipliers_accepted_at_small_and_large_scales(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real HiGHS solves on large-scale valid LPs remain certified.
+    problem = _make_problem(
+        a_ub=[[0.0, -1.0], [0.0, 1.0]],
+        b_ub=[-1e10, 2e10],
+        bounds=[(0.0, 1e10), (None, None)],
+    )
+    min_res = solve_lp(problem, [0.0, 1.0])
+    max_res = solve_lp(problem, [0.0, 1.0], maximize=True)
+
+    assert min_res.validation_status is VALIDATED
+    assert min_res.is_certified is True
+    assert min_res.certified_bound == pytest.approx(1e10)
+    assert max_res.validation_status is VALIDATED
+    assert max_res.is_certified is True
+    assert max_res.certified_bound == pytest.approx(2e10)
+
+    # Moderate multiplier magnitude (||y||_inf = 50.0) tolerates tiny 4e-9
+    # relative floating-point roundoff (within 1e-8 relative and 1e-6 abs cap).
+    mod_problem = _make_problem(
+        a_ub=[[0.0, -1.0], [1.0, 0.0]],
+        b_ub=[-1.0, 0.0],
+    )
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1.0],
+                status=0,
+                fun=50.0,
+                y=[-50.0, 2e-7],
+                lam_lb=[0.0, 0.0],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    mod_res = solve_lp(mod_problem, [0.0, 50.0])
+    assert mod_res.validation_status is VALIDATED
+    assert mod_res.certified_bound == pytest.approx(50.0)
+
+
+def test_large_scale_primal_residual_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 1. An unrelated large coordinate (x[1] = 1e10) must not dilute a violation
+    #    on row x[0] <= 1.0.
+    problem_unrelated = _make_problem(
+        a_ub=[[1.0, 0.0]],
+        b_ub=[1.0],
+        bounds=[(None, None), (1e10, 1e10)],
+    )
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [2.0, 1e10],
+                status=0,
+                fun=1e10,
+                y=[0.0],
+                lam_lb=[0.0, 1.0],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    res_unrelated = solve_lp(problem_unrelated, [0.0, 1.0])
+    diag_unrelated = _primal_residual_diagnostics(
+        problem_unrelated, np.array([2.0, 1e10], dtype=np.float64)
+    )
+    assert diag_unrelated.raw_residual == pytest.approx(1.0)
+    assert diag_unrelated.normalized_residual == pytest.approx(0.5)
+    assert res_unrelated.max_primal_residual == pytest.approx(0.5)
+    assert res_unrelated.validation_status is UNVALIDATED
+    assert res_unrelated.certified_bound is None
+
+    # 2. When a bound itself is huge (z0 >= 1e10) and primal violates it by 1.0,
+    #    normalized residual is 1e-10 <= 1e-8, while raw residual is 1.0; the
+    #    distinction is preserved and the infeasible point is NEVER certified.
+    problem_large_bound = _make_problem(
+        bounds=[(0.0, 1.0), (1e10, None)],
+    )
+    infeasible_x = np.array([0.0, 1e10 - 1.0], dtype=np.float64)
+    diag_large = _primal_residual_diagnostics(problem_large_bound, infeasible_x)
+    assert diag_large.raw_residual == pytest.approx(1.0)
+    assert diag_large.normalized_residual == pytest.approx(1e-10)
+
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                infeasible_x,
+                status=0,
+                fun=1e10 - 1.0,
+                y=[],
+                lam_lb=[0.0, 1.0],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    res_infeasible = solve_lp(problem_large_bound, [0.0, 1.0])
+    assert res_infeasible.validation_status is UNVALIDATED
+    assert res_infeasible.is_certified is False
+    assert res_infeasible.certified_bound is None
+    assert res_infeasible.max_primal_residual == pytest.approx(1e-10)
+    assert "raw 1.000e+00" in res_infeasible.message
+
+
+def test_valid_large_scale_lp_remains_certified() -> None:
+    # Valid large-scale rotated constraints solved by real HiGHS still validate.
+    problem_valid_large = _make_problem(
+        a_ub=[[1.7, 2.3], [-3.1, 1.4], [0.7, -1.9]],
+        b_ub=[3.0e10, -0.5e10, -0.1e10],
+        a_eq=[[1.1, 2.9]],
+        b_eq=[2.2e10],
+    )
+    valid_res = solve_lp(problem_valid_large, [0.3, 0.7])
+    assert valid_res.status is OPTIMAL
+    assert valid_res.validation_status is VALIDATED
+    assert valid_res.is_certified is True
+    assert "primal_raw=" in valid_res.message
+    assert "primal_norm=" in valid_res.message
+
+
+def test_large_scale_negative_duality_gap_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Minimization with primal = 1e10 and dual = 1e10 + 10.0: relative gap is
+    # only -1e-9 (previously accepted!), yet absolute gap is -10.0.
+    problem_min = _make_problem(a_ub=[[0.0, -1.0]], b_ub=[-1e10])
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1e10],
+                status=0,
+                fun=1e10,
+                y=[-(1.0 + 1e-9)],
+                lam_lb=[0.0, 0.0],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    res_min = solve_lp(problem_min, [0.0, 1.0])
+    assert res_min.duality_gap == pytest.approx(-10.0)
+    assert res_min.validation_status is UNVALIDATED
+    assert res_min.is_certified is False
+    assert res_min.certified_bound is None
+    assert "negative absolute duality gap -1.000e+01" in res_min.message
+    assert "rel_gap -1.000e-09" in res_min.message
+
+    # Maximization direction: primal = 1e10, conservative dual upper = 1e10 - 10.0.
+    problem_max = _make_problem(a_ub=[[0.0, 1.0]], b_ub=[1e10])
+    _monkeypatch_linprog(
+        monkeypatch,
+        [
+            _fake_result(
+                [0.0, 1e10],
+                status=0,
+                fun=-1e10,
+                y=[-(1.0 - 1e-9)],
+                lam_lb=[0.0, 0.0],
+                lam_ub=[0.0, 0.0],
+            )
+        ],
+    )
+    res_max = solve_lp(problem_max, [0.0, 1.0], maximize=True)
+    assert res_max.duality_gap == pytest.approx(-10.0)
+    assert res_max.validation_status is UNVALIDATED
+    assert res_max.is_certified is False
+    assert res_max.certified_bound is None
+    assert "negative absolute duality gap -1.000e+01" in res_max.message
+    assert "rel_gap -1.000e-09" in res_max.message
+
+    # Verify direction helper preserves upper - lower convention in both modes.
+    gap_min = _duality_gap_diagnostics(1e10, 1e10 + 10.0, maximize=False)
+    gap_max = _duality_gap_diagnostics(1e10, 1e10 - 10.0, maximize=True)
+    assert gap_min.absolute_gap == pytest.approx(-10.0)
+    assert gap_max.absolute_gap == pytest.approx(-10.0)
+    assert gap_min.relative_gap == pytest.approx(-10.0 / (1e10 + 10.0))
+    assert gap_max.relative_gap == pytest.approx(-10.0 / 1e10)
+
+
+def test_positive_infinite_execution_time_rejected() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        LPSolverResult(
+            status=INFEASIBLE,
+            success=False,
+            maximize=False,
+            objective_neuron=None,
+            solution=None,
+            objective_value=None,
+            conservative_bound=None,
+            duality_gap=None,
+            max_primal_residual=None,
+            max_dual_residual=None,
+            validation_status=UNVALIDATED,
+            execution_time_seconds=float("inf"),
+            message="inf time",
+        )
+
+
+def test_negative_infinite_execution_time_rejected() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        LPSolverResult(
+            status=INFEASIBLE,
+            success=False,
+            maximize=False,
+            objective_neuron=None,
+            solution=None,
+            objective_value=None,
+            conservative_bound=None,
+            duality_gap=None,
+            max_primal_residual=None,
+            max_dual_residual=None,
+            validation_status=UNVALIDATED,
+            execution_time_seconds=float("-inf"),
+            message="-inf time",
+        )
+
+
+def test_nan_execution_time_rejected() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        LPSolverResult(
+            status=INFEASIBLE,
+            success=False,
+            maximize=False,
+            objective_neuron=None,
+            solution=None,
+            objective_value=None,
+            conservative_bound=None,
+            duality_gap=None,
+            max_primal_residual=None,
+            max_dual_residual=None,
+            validation_status=UNVALIDATED,
+            execution_time_seconds=float("nan"),
+            message="nan time",
+        )
+
+
+def test_minimization_and_maximization_behavior_preserved() -> None:
+    problem = _make_problem(
+        a_ub=[[1.0, 0.0], [0.0, 1.0], [-1.0, -1.0]],
+        b_ub=[3.0, 4.0, -2.0],
+        bounds=[(0.0, None), (0.0, None)],
+    )
+    minimum = solve_lp(problem, [1.0, 2.0])
+    maximum = solve_lp(problem, [1.0, 2.0], maximize=True)
+
+    assert minimum.status is OPTIMAL
+    assert maximum.status is OPTIMAL
+    assert minimum.is_certified and maximum.is_certified
+    assert minimum.certified_bound == pytest.approx(2.0)
+    assert minimum.lower_bound == pytest.approx(2.0)
+    assert maximum.certified_bound == pytest.approx(11.0)
+    assert maximum.upper_bound == pytest.approx(11.0)
+    assert "abs_gap=" in minimum.message and "rel_gap=" in minimum.message
+    assert "abs_gap=" in maximum.message and "rel_gap=" in maximum.message
+
+
+def test_unvalidated_results_never_expose_certified_bound() -> None:
+    optimal_but_unvalidated = LPSolverResult(
+        status=OPTIMAL,
+        success=True,
+        maximize=False,
+        objective_neuron=None,
+        solution=np.array([0.0, 1.0]),
+        objective_value=1.0,
+        conservative_bound=0.9,
+        duality_gap=0.1,
+        max_primal_residual=1e-3,
+        max_dual_residual=0.0,
+        validation_status=UNVALIDATED,
+        execution_time_seconds=0.0,
+        message="unvalidated despite optimal",
+    )
+    assert optimal_but_unvalidated.is_certified is False
+    assert optimal_but_unvalidated.certified_bound is None
+
+    for status in (INFEASIBLE, UNBOUNDED, ITERATION_LIMIT, NUMERICAL_ISSUE, INVALID_PROBLEM, FAILED):
+        res = LPSolverResult(
+            status=status,
+            success=False,
+            maximize=False,
+            objective_neuron=None,
+            solution=None,
+            objective_value=None,
+            conservative_bound=None,
+            duality_gap=None,
+            max_primal_residual=None,
+            max_dual_residual=None,
+            validation_status=UNVALIDATED,
+            execution_time_seconds=0.0,
+            message=f"terminal {status.value}",
+        )
+        assert res.is_certified is False
+        assert res.certified_bound is None

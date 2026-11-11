@@ -986,3 +986,264 @@ def test_deep_network_soundness_sweep() -> None:
             assert problem.layout.total_variables == 25
             for x in samples:
                 _assert_concrete_execution_satisfies(problem, network, x)
+
+
+# ==============================================================================
+# 11. Negative-weight linear layer: coefficient encoding
+# ==============================================================================
+
+
+def test_linear_layer_negative_weight_coefficients() -> None:
+    """Linear layer with purely-negative weights encodes z_j + |W|a_k = b.
+
+    For weight W = [[-3.0, -1.0]], bias b = [-2.0] and inputs x in [-1, 1]^2:
+      z = -3 x0 - x1 - 2.
+    The equality row must be:  z0 + 3 x0 + x1 = -2
+    i.e. A_eq row = [3.0, 1.0, 1.0], b_eq = [-2.0].
+    """
+    weight = np.array([[-3.0, -1.0]])
+    bias = np.array([-2.0])
+    network = _make_network(
+        (_make_linear(0, weight, bias),),
+        source_model="NegWeightNet",
+    )
+    # Variables: x0, x1, z0  (n=3; one linear layer, no ReLU)
+    region = InputRegion(center=np.array([0.0, 0.0]), radius=1.0)
+    trace = get_intermediate_bounds(network, region)
+    problem = build_lp_problem(network, region, trace, NeuronRef(0, "pre", 0))
+
+    assert problem.layout.total_variables == 3
+    assert problem.A_ub is None
+    # Row: z0 - (-3)*x0 - (-1)*x1 = -2  =>  [3.0, 1.0, 1.0] @ xi = -2.0
+    np.testing.assert_allclose(problem.A_eq, [[3.0, 1.0, 1.0]], rtol=0, atol=0)
+    np.testing.assert_allclose(problem.b_eq, [-2.0], rtol=0, atol=0)
+
+    # Pre-activation bounds: z = -3 x0 - x1 - 2 over [-1,1]^2
+    # min = -3(1) - (1) - 2 = -6, max = -3(-1) - (-1) - 2 = 2
+    assert problem.variable_bounds[2] == (-6.0, 2.0)
+
+    for x in (
+        np.array([-1.0, -1.0]),
+        np.array([1.0, 1.0]),
+        np.array([0.0, 0.0]),
+        np.array([-1.0, 1.0]),
+    ):
+        _assert_concrete_execution_satisfies(problem, network, x)
+
+
+# ==============================================================================
+# 12. Multi-layer incoming_slice routing (Linear -> ReLU -> Linear -> ReLU)
+# ==============================================================================
+
+
+def _four_layer_net() -> MathematicalNetwork:
+    """3 -> 2 -> 2 -> 1 network: Linear -> ReLU -> Linear -> ReLU.
+
+    Layer 0 (Linear, 3->2): W = [[1, 0, -1], [0, 1, 1]], b = [0, 0]
+    Layer 1 (ReLU)
+    Layer 2 (Linear, 2->2): W = [[1, -1], [-1, 1]], b = [0.5, -0.5]
+    Layer 3 (ReLU)
+    """
+    return _make_network(
+        (
+            _make_linear(0, np.array([[1.0, 0.0, -1.0], [0.0, 1.0, 1.0]]), np.zeros(2)),
+            ReLULayer(position=1),
+            _make_linear(2, np.array([[1.0, -1.0], [-1.0, 1.0]]), np.array([0.5, -0.5])),
+            ReLULayer(position=3),
+        ),
+        source_model="FourLayerNet",
+    )
+
+
+def test_four_layer_variable_layout() -> None:
+    """Variables: x(3), L0_pre(2), L1_pre(2), L1_post(2), L2_pre(2), L3_pre(2), L3_post(2).
+
+    Total = 3 + 2 + 2 + 2 + 2 + 2 + 2 = 15.
+    """
+    network = _four_layer_net()
+    region = InputRegion(center=np.zeros(3), radius=1.0)
+    trace = get_intermediate_bounds(network, region)
+    problem = build_lp_problem(network, region, trace, NeuronRef(3, "post", 0))
+
+    assert problem.layout.total_variables == 15
+    assert problem.layout.input_dim == 3
+    # Layer 0 (Linear): pre at 3, dim 2 — no post
+    assert problem.layout.variable_slice(0, "pre") == slice(3, 5)
+    assert problem.layout.post_offsets[0] is None
+    # Layer 1 (ReLU): pre at 5, post at 7
+    assert problem.layout.variable_slice(1, "pre") == slice(5, 7)
+    assert problem.layout.variable_slice(1, "post") == slice(7, 9)
+    # Layer 2 (Linear): pre at 9, dim 2 — no post
+    assert problem.layout.variable_slice(2, "pre") == slice(9, 11)
+    assert problem.layout.post_offsets[2] is None
+    # Layer 3 (ReLU): pre at 11, post at 13
+    assert problem.layout.variable_slice(3, "pre") == slice(11, 13)
+    assert problem.layout.variable_slice(3, "post") == slice(13, 15)
+
+
+def test_four_layer_incoming_slice_routes_through_relu_post() -> None:
+    """After a ReLU layer the next Linear must couple to the post-activation slice.
+
+    Layer 2 is a Linear that follows ReLU layer 1.  Its equality rows must
+    reference columns 7..8 (post of layer 1) as inputs, not columns 5..6
+    (pre of layer 1).  We identify the affine-equality rows by their output
+    column: the affine equality for output neuron j has coefficient +1.0 at
+    the output variable (pre-activation columns 9 and 10).  Other rows that
+    write to columns 9..10 are the ReLU-coupling rows from layer 3, which
+    carry coefficient +1.0 at column 11 or 12, so we distinguish them by
+    requiring that only the output pre-column (9 or 10) has a +1.0 and no
+    other layer-3 column (11..14) is non-zero in that row.
+    """
+    network = _four_layer_net()
+    region = InputRegion(center=np.zeros(3), radius=0.5)
+    trace = get_intermediate_bounds(network, region)
+    problem = build_lp_problem(network, region, trace, NeuronRef(2, "pre", 0))
+
+    A_eq = problem.A_eq
+    n_eq = A_eq.shape[0]
+
+    # The affine equality rows for layer 2 set the coefficient at columns 9 or
+    # 10 to exactly +1.0 (the z_j variable for the output neuron) and have
+    # zero in all layer-3 columns (11..14).
+    affine_rows = [
+        r
+        for r in range(n_eq)
+        if (A_eq[r, 9] == 1.0 or A_eq[r, 10] == 1.0)
+        and np.all(A_eq[r, 11:15] == 0.0)
+    ]
+    # There are exactly 2 output neurons in layer 2.
+    assert len(affine_rows) == 2, f"Expected 2 layer-2 affine rows, got {len(affine_rows)}"
+
+    for r in affine_rows:
+        # Columns 5..6 (pre of layer 1) must be zero — routing is via post.
+        np.testing.assert_array_equal(
+            A_eq[r, 5:7],
+            np.zeros(2),
+            err_msg=(
+                f"Row {r} of A_eq references pre-activation columns of layer 1; "
+                "expected routing through post-activation columns 7-8."
+            ),
+        )
+        # At least one of columns 7..8 (post of layer 1) must carry a weight.
+        assert np.any(A_eq[r, 7:9] != 0.0), (
+            f"Row {r} has zero weight coefficients in post-activation columns 7-8; "
+            "incoming_slice may be routing incorrectly."
+        )
+
+
+def test_four_layer_concrete_soundness() -> None:
+    """Every concrete execution must satisfy the full LP for the 4-layer network."""
+    network = _four_layer_net()
+    region = InputRegion(center=np.zeros(3), radius=0.5)
+    trace = get_intermediate_bounds(network, region)
+
+    for layer_index, phase in ((2, "pre"), (3, "pre"), (3, "post")):
+        neuron_index = 0
+        problem = build_lp_problem(
+            network, region, trace, NeuronRef(layer_index, phase, neuron_index)
+        )
+        for x in sample_region_inputs(region, 40, seed=42):
+            _assert_concrete_execution_satisfies(problem, network, x)
+
+
+# ==============================================================================
+# 13. Narrow unstable ReLU interval
+# ==============================================================================
+
+
+def test_narrow_unstable_relu_triangle_coefficients() -> None:
+    """Triangle relaxation with a very narrow unstable interval l=-1e-9, u=1e-9.
+
+    For l = -1e-9 and u = 1e-9 the three inequality rows must be:
+      -y <= 0
+       z - y <= 0
+      -u*z + (u - l)*y <= -u*l
+    i.e. coefficients [-u, u-l] = [-1e-9, 2e-9] and rhs = -(-1e-9)(1e-9) = 1e-18.
+    """
+    l, u = -1e-9, 1e-9
+    network = _identity_net()
+    box = Box(np.array([l, -1.0]), np.array([u, 1.0]))
+    trace = get_intermediate_bounds(network, box)
+    problem = build_lp_problem(network, box, trace, NeuronRef(1, "post", 0))
+
+    # Variables: x0, x1, z0(pre), z1(pre), y1(post)  (indices 0-4).
+    assert problem.A_ub is not None
+    assert problem.A_ub.shape == (3, 5)
+
+    # Row 0: -y <= 0
+    np.testing.assert_allclose(problem.A_ub[0], [0.0, 0.0, 0.0, 0.0, -1.0], atol=0)
+    np.testing.assert_allclose(problem.b_ub[0], 0.0, atol=0)
+
+    # Row 1: z - y <= 0  (pre=col3, post=col4)
+    np.testing.assert_allclose(problem.A_ub[1], [0.0, 0.0, 0.0, 1.0, -1.0], atol=0)
+    np.testing.assert_allclose(problem.b_ub[1], 0.0, atol=0)
+
+    # Row 2: -u*z + (u-l)*y <= -u*l
+    np.testing.assert_allclose(
+        problem.A_ub[2], [0.0, 0.0, 0.0, -u, u - l], rtol=1e-12, atol=0
+    )
+    np.testing.assert_allclose(problem.b_ub[2], -u * l, rtol=1e-12, atol=0)
+
+    # Concrete soundness at the chord endpoints.
+    for x in (np.array([l, 0.0]), np.array([u, 0.0]), np.array([0.0, 0.0])):
+        _assert_concrete_execution_satisfies(problem, network, x)
+
+
+# ==============================================================================
+# 14. Wider network (3->2 Linear-only) — negative bias
+# ==============================================================================
+
+
+def test_wider_linear_only_network_negative_bias() -> None:
+    """3->2 pure-linear network with a negative bias encodes correctly.
+
+    W = [[1, -1, 2], [-2, 0, 1]], b = [-3, 4]
+    Over InputRegion center=[0,0,0], radius=1.
+
+    For output 0:  z0 = x0 - x1 + 2 x2 - 3
+      IBP: min = 1(-1) + (-1)(1) + 2(-1) - 3 = -7, max = 1 + 1 + 2 - 3 = 1
+    For output 1:  z1 = -2 x0 + x2 + 4
+      IBP: min = -2(1) + (-1) + 4 = 1, max = -2(-1) + 1 + 4 = 7
+    """
+    weight = np.array([[1.0, -1.0, 2.0], [-2.0, 0.0, 1.0]])
+    bias = np.array([-3.0, 4.0])
+    network = _make_network(
+        (_make_linear(0, weight, bias),),
+        source_model="WiderLinearNet",
+    )
+    # Variables: x0, x1, x2, z0, z1  (n=5)
+    region = InputRegion(center=np.zeros(3), radius=1.0)
+    trace = get_intermediate_bounds(network, region)
+
+    problem0 = build_lp_problem(network, region, trace, NeuronRef(0, "pre", 0))
+    problem1 = build_lp_problem(network, region, trace, NeuronRef(0, "pre", 1))
+
+    assert problem0.layout.total_variables == 5
+    assert problem0.A_ub is None
+
+    # Row for output 0: z0 - x0 + x1 - 2 x2 = -3  => [−1, 1, −2, 1, 0]
+    np.testing.assert_allclose(
+        problem0.A_eq[0], [-1.0, 1.0, -2.0, 1.0, 0.0], rtol=0, atol=0
+    )
+    np.testing.assert_allclose(problem0.b_eq[0], -3.0, rtol=0, atol=0)
+    # Row for output 1: z1 + 2 x0 - x2 = 4  => [2, 0, −1, 0, 1]
+    np.testing.assert_allclose(
+        problem0.A_eq[1], [2.0, 0.0, -1.0, 0.0, 1.0], rtol=0, atol=0
+    )
+    np.testing.assert_allclose(problem0.b_eq[1], 4.0, rtol=0, atol=0)
+
+    # Confirm variable bounds for pre-activation variables.
+    assert problem0.variable_bounds[3] == pytest.approx((-7.0, 1.0))
+    assert problem0.variable_bounds[4] == pytest.approx((1.0, 7.0))
+
+    # Concrete soundness: corner and center inputs.
+    corners = [
+        np.array([-1.0, -1.0, -1.0]),
+        np.array([1.0, 1.0, 1.0]),
+        np.array([1.0, -1.0, 1.0]),
+        np.array([-1.0, 1.0, -1.0]),
+        np.zeros(3),
+    ]
+    for x in corners:
+        _assert_concrete_execution_satisfies(problem0, network, x)
+        _assert_concrete_execution_satisfies(problem1, network, x)

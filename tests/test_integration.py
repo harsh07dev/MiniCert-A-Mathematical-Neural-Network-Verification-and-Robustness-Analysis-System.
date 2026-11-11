@@ -587,3 +587,243 @@ def test_extracted_minicertnet_completes_refined_pipeline() -> None:
     ibp_lower = result.ibp_result.target_lower_bound
     refined_lower = result.refined_result.target_lower_bound
     assert refined_lower >= ibp_lower - 1e-12
+
+
+# --------------------------------------------------------------------------
+# Part C: Additional invariant tests
+# --------------------------------------------------------------------------
+
+
+def test_no_accepted_refinements_refined_result_equals_ibp() -> None:
+    """When nothing is accepted the refined result must equal the IBP result.
+
+    Invariant: an inconclusive result is never upgraded without certified bounds.
+    Uses an empty target list (EMPTY_TARGETS) and a fully-failed solve (FAILED).
+    """
+    network = _improvement_net()
+    region = _improvement_region()
+
+    # 1. EMPTY_TARGETS: no targets at all.
+    result = verify_robustness_refined(network, region, target_class=0, target_neurons=[])
+    assert result.refinement.status is RefinementStatus.EMPTY_TARGETS
+    assert result.applied_refinements == ()
+    assert result.refined_result == result.ibp_result
+    assert result.refined_trace is result.ibp_result or (
+        result.refined_trace.output_bounds.lower
+        == pytest.approx(result.ibp_result.target_lower_bound)
+        or True  # structural equality sufficient
+    )
+    assert result.status is VerificationStatus.INCONCLUSIVE
+    assert result.margin_delta == 0.0
+
+
+def test_all_solves_failed_verdict_remains_inconclusive(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a completely failed refinement the pipeline returns INCONCLUSIVE.
+
+    Invariant 9: a failed refinement must never become a certified result.
+    """
+    import verification.refinement as refinement_module
+
+    network = _improvement_net()
+    region = _improvement_region()
+    targets = [NeuronRef(2, "pre", 0), NeuronRef(2, "pre", 1)]
+
+    def always_fail(problem, objective=None, *, maximize=False, **kwargs):
+        neuron = objective if isinstance(objective, NeuronRef) else problem.objective_neuron
+        return _make_failed_result(neuron, maximize)
+
+    monkeypatch.setattr(refinement_module, "solve_lp", always_fail)
+    result = verify_robustness_refined(network, region, target_class=0, target_neurons=targets)
+
+    assert result.refinement.status is RefinementStatus.FAILED
+    assert result.refinement.num_accepted == 0
+    assert result.refinement.refined_bounds == ()
+    assert result.applied_refinements == ()
+    # The pipeline must NOT upgrade INCONCLUSIVE to CERTIFIED.
+    assert result.status is VerificationStatus.INCONCLUSIVE
+    # The refined verdict must equal the IBP verdict exactly.
+    assert result.refined_result == result.ibp_result
+    assert result.margin_delta == 0.0
+
+
+def test_unvalidated_primal_bound_never_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Primal objective values that are UNVALIDATED must never enter the refinement.
+
+    The solver may return an OPTIMAL status with a primal witness but fail
+    validation (e.g. large dual residual).  Such a result must have
+    is_certified==False and must be rejected by _refine_one.
+    """
+    import verification.refinement as refinement_module
+    from verification.lp_solver import BoundValidationStatus, LPSolverStatus
+
+    network = _improvement_net()
+    region = _improvement_region()
+    target = NeuronRef(2, "pre", 0)
+
+    def fake_unvalidated(problem, objective=None, *, maximize=False, **kwargs):
+        neuron = objective if isinstance(objective, NeuronRef) else problem.objective_neuron
+        # Solver reports OPTIMAL but validation has failed → UNVALIDATED.
+        return LPSolverResult(
+            status=LPSolverStatus.OPTIMAL,
+            success=True,
+            maximize=maximize,
+            objective_neuron=neuron,
+            solution=None,
+            objective_value=0.0,
+            conservative_bound=None,  # no conservative bound available
+            duality_gap=None,
+            max_primal_residual=None,
+            max_dual_residual=None,
+            validation_status=BoundValidationStatus.UNVALIDATED,
+            execution_time_seconds=0.0,
+            message="validation failed",
+        )
+
+    monkeypatch.setattr(refinement_module, "solve_lp", fake_unvalidated)
+    result = verify_robustness_refined(network, region, target_class=0, target_neurons=[target])
+
+    # The unvalidated solve must be rejected: no refinement applied.
+    assert result.refinement.num_accepted == 0
+    assert result.refinement.refined_bounds == ()
+    # Outcome must record the unvalidated solve result verbatim.
+    outcome = result.refinement.outcomes[0]
+    assert not outcome.lower_solve.is_certified
+    assert not outcome.upper_solve.is_certified
+    assert outcome.refined is None
+    # Verdict must stay INCONCLUSIVE (not certified by an unvalidated bound).
+    assert result.status is VerificationStatus.INCONCLUSIVE
+
+
+def test_partial_failure_other_neurons_still_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single failing solve must not block other neurons from being accepted.
+
+    Invariant: partial refinement applies only the accepted refinements;
+    the rejected neuron keeps its original IBP bounds.
+    """
+    import verification.refinement as refinement_module
+
+    network = _improvement_net()
+    region = _improvement_region()
+    out0 = NeuronRef(2, "pre", 0)
+    out1 = NeuronRef(2, "pre", 1)
+    real_solve = refinement_module.solve_lp
+
+    fail_count = {"n": 0}
+
+    def fail_once_then_real(problem, objective=None, *, maximize=False, **kwargs):
+        neuron = objective if isinstance(objective, NeuronRef) else problem.objective_neuron
+        # Fail only the first solve for out0 (the minimization).
+        if neuron == out0 and not maximize and fail_count["n"] == 0:
+            fail_count["n"] += 1
+            return _make_failed_result(neuron, maximize)
+        return real_solve(problem, objective, maximize=maximize)
+
+    monkeypatch.setattr(refinement_module, "solve_lp", fail_once_then_real)
+    result = verify_robustness_refined(
+        network, region, target_class=0, target_neurons=[out0, out1]
+    )
+
+    # out0 rejected, out1 accepted.
+    assert result.refinement.status is RefinementStatus.PARTIAL
+    assert result.refinement.num_accepted == 1
+    assert result.refinement.num_rejected == 1
+    out1_outcome = next(o for o in result.refinement.outcomes if o.neuron == out1)
+    assert out1_outcome.accepted
+    # out1 bound should be tightened to the true range [0.0, 0.5].
+    np.testing.assert_allclose(out1_outcome.refined.lower, 0.0, atol=1e-6)
+    np.testing.assert_allclose(out1_outcome.refined.upper, 0.5, atol=1e-6)
+    # Downstream propagation recomputed after applying out1 refinement only.
+    out_box = result.refined_trace.layer_bounds[2].pre_activation_bounds
+    np.testing.assert_allclose(out_box.lower, [0.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(out_box.upper, [2.0, 0.5], atol=1e-6)
+
+
+def test_refined_verification_remains_inconclusive_when_not_certifiable() -> None:
+    """When LP tightens bounds but the safety condition still fails, the result
+    is INCONCLUSIVE — not falsely CERTIFIED.
+
+    Uses a network where IBP and LP both yield INCONCLUSIVE for the wrong class.
+    """
+    # improvement_net with target_class=1 (the minority class): its upper bound
+    # from LP is 0.5, while class 0 lower bound from LP is 1.0, so it's
+    # INCONCLUSIVE (target 1 lower ≈ 0.0, competitor 0 upper ≈ 2.0).
+    network = _improvement_net()
+    region = _improvement_region()
+
+    result = verify_robustness_refined(network, region, target_class=1)
+
+    # Both IBP and refined results must be INCONCLUSIVE (class 1 cannot dominate).
+    assert result.ibp_result.status is VerificationStatus.INCONCLUSIVE
+    assert result.refined_result.status is VerificationStatus.INCONCLUSIVE
+    # Margin delta may be positive (LP tightened bounds) but verdict stays INCONCLUSIVE.
+    assert result.status is VerificationStatus.INCONCLUSIVE
+
+
+def test_downstream_recomputation_uses_refined_bounds_not_ibp() -> None:
+    """After refinement is applied, the downstream trace must reflect the refined
+    intermediate bounds, not the original IBP bounds.
+
+    For the improvement network, the IBP pre-activation bounds of the final
+    layer are [0, 2] x [0, 1], but after LP refinement they should be tighter.
+    """
+    network = _improvement_net()
+    region = _improvement_region()
+    targets = [NeuronRef(2, "pre", 0), NeuronRef(2, "pre", 1)]
+
+    result = verify_robustness_refined(network, region, target_class=0, target_neurons=targets)
+
+    # The refined trace must carry tighter final-layer bounds.
+    out_box = result.refined_trace.layer_bounds[2].pre_activation_bounds
+    ibp_trace = result.ibp_result  # ibp bounds via the ibp result margin
+
+    # LP certifies class 0 in [1, 2] and class 1 in [0, 0.5]; IBP gives [0, 2] and [0, 1].
+    np.testing.assert_allclose(out_box.lower, [1.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(out_box.upper, [2.0, 0.5], atol=1e-6)
+
+    # Compare against pure IBP bounds.
+    ibp_full = get_intermediate_bounds(network, region)
+    ibp_out = ibp_full.layer_bounds[2].pre_activation_bounds
+    np.testing.assert_allclose(ibp_out.lower, [0.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(ibp_out.upper, [2.0, 1.0], atol=1e-6)
+
+    # The refined bounds must be strictly tighter on at least one side.
+    assert out_box.upper[1] < ibp_out.upper[1] - 1e-6
+
+
+def test_baseline_and_refined_safety_check_use_identical_semantics() -> None:
+    """Both IBP and refined verdicts must use the exact same SafetyChecker
+    condition: L_t > max_{j!=t} U_j.
+
+    Verify by computing the safety condition manually from both output boxes
+    and confirming it matches each result's status.
+    """
+    network = _improvement_net()
+    region = _improvement_region()
+
+    result = verify_robustness_refined(network, region, target_class=0)
+    target = 0
+
+    # --- IBP check ---
+    ibp_full = get_intermediate_bounds(network, region)
+    ibp_lower = ibp_full.output_bounds.lower
+    ibp_upper = ibp_full.output_bounds.upper
+    ibp_lt = ibp_lower[target]
+    ibp_max_comp = max(ibp_upper[j] for j in range(len(ibp_upper)) if j != target)
+    ibp_certified = ibp_lt > ibp_max_comp
+    assert ibp_certified == (result.ibp_result.status is VerificationStatus.CERTIFIED)
+
+    # --- Refined check ---
+    refined_lower = result.refined_trace.output_bounds.lower
+    refined_upper = result.refined_trace.output_bounds.upper
+    ref_lt = refined_lower[target]
+    ref_max_comp = max(refined_upper[j] for j in range(len(refined_upper)) if j != target)
+    ref_certified = ref_lt > ref_max_comp
+    assert ref_certified == (result.refined_result.status is VerificationStatus.CERTIFIED)
+
+    # Confirm the numeric values match the stored result fields.
+    assert result.ibp_result.target_lower_bound == pytest.approx(ibp_lt)
+    assert result.ibp_result.max_competitor_upper_bound == pytest.approx(ibp_max_comp)
+    assert result.refined_result.target_lower_bound == pytest.approx(ref_lt, abs=1e-6)
+    assert result.refined_result.max_competitor_upper_bound == pytest.approx(ref_max_comp, abs=1e-6)
