@@ -230,6 +230,11 @@ def extract_network(model: nn.Module) -> MathematicalNetwork:
             )
             current_features = module.out_features
         elif type(module) is nn.ReLU:
+            if layers and isinstance(layers[-1], ReLULayer):
+                raise UnsupportedLayerError(
+                    f"Consecutive ReLU layers at positions {layers[-1].position} and "
+                    f"{position} are not supported; insert a Linear layer between them"
+                )
             layers.append(ReLULayer(position=position))
         else:
             raise UnsupportedLayerError(

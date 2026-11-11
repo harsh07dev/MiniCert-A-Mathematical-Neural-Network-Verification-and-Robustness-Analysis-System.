@@ -51,14 +51,22 @@ is::
 
 and stationarity requires ``A_ub.T @ y + A_eq.T @ nu + lambda_lb +
 lambda_ub == c``. The solver checks, at the documented relative tolerance
-``_VALIDATION_TOL = 1e-8`` (applied to row- and magnitude-scaled
-residuals):
+``_VALIDATION_TOL = 1e-8`` alongside explicit absolute safeguards:
 
-1. primal feasibility: inequality, equality and bound violations,
-2. dual sign feasibility: ``y <= tol``, ``lambda_lb >= -tol``,
-   ``lambda_ub <= tol``,
-3. dual stationarity residual,
-4. nonnegative duality gap (primal objective minus dual objective).
+1. primal feasibility: inequality, equality, and bound violations tracked as
+   both raw absolute residuals and row-locally normalized residuals (so large
+   unrelated coordinates or right-hand sides cannot hide local infeasibility,
+   with normalized residual ``<= 1e-8`` and row-norm-adjusted absolute
+   residual ``<= _MAX_ABS_PRIMAL_TOL = 1e-4``),
+2. dual sign feasibility: checked **independently** per multiplier family
+   (``y <= 0``, ``lambda_lb >= 0``, ``lambda_ub <= 0``) using each family's
+   own scale ``min(max(1.0, ||m||_inf), _MAX_MULTIPLIER_SIGN_SCALE)`` rather
+   than ``abs(dual)`` so large dual or primal objectives never mask
+   wrong-sign multipliers exceeding ``_MAX_ABS_DUAL_SIGN_TOL = 1e-6``,
+3. dual stationarity residual (normalized by gradient and objective norms),
+4. duality gap in the original problem direction: checks both relative gap
+   ``>= -1e-8`` and absolute gap ``>= -_MAX_ABS_NEGATIVE_GAP = -1e-4``, and
+   records both absolute and relative magnitudes.
 
 When every check passes the result is marked
 ``BoundValidationStatus.VALIDATED`` and ``certified_bound`` exposes the
@@ -69,8 +77,8 @@ never be mistaken for a certified refined bound.
 This validation is **tolerance-based numerical checking**, not a rigorous
 interval-arithmetic or exact-arithmetic certificate: it makes no claim about
 rounding errors accumulated inside the solver. No numerical error guarantee
-is invented here; the tolerance and the checked quantities are documented so
-downstream stages can reason about what ``VALIDATED`` means.
+is invented here; the tolerances, caps, and checked quantities are documented
+so downstream stages can reason about what ``VALIDATED`` means.
 
 Status mapping
 --------------
@@ -94,6 +102,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import math
+from numbers import Real
 import time
 from typing import Any, Mapping, Optional
 
@@ -103,12 +112,28 @@ from numpy.typing import NDArray
 from abstract_domain.bounds import NeuronRef
 from verification.lp import FloatArray, LPProblem
 
-# Relative validation tolerance used for every primal/dual feasibility check
-# below. Residuals are scaled by the magnitude of the row coefficients, the
-# right-hand sides, the variable magnitudes, and the objective, so a residual
-# of exactly 1e-8 means "violation of one part in 1e8 of the local problem
-# scale". This is a numerical check, not an exact certificate.
+# Relative validation tolerance used across primal, dual, and duality-gap
+# checks. A normalized residual of 1e-8 means a violation of at most one part
+# in 1e8 of the local scale. This is a numerical check, not an exact
+# certificate.
 _VALIDATION_TOL = 1e-8
+
+# Multiplier-specific sign tolerance cap. Each multiplier family (y,
+# lambda_lb, lambda_ub) scales its sign check only by its own infinity norm,
+# floored at 1.0 and capped at _MAX_MULTIPLIER_SIGN_SCALE (100.0). That allows
+# ~1e-8 relative float noise on moderately large multipliers while guaranteeing
+# that no absolute wrong-sign multiplier above _MAX_ABS_DUAL_SIGN_TOL (1e-6)
+# can be accepted merely because the dual or primal objective is large.
+_MAX_ABS_DUAL_SIGN_TOL = 1e-6
+_MAX_MULTIPLIER_SIGN_SCALE = _MAX_ABS_DUAL_SIGN_TOL / _VALIDATION_TOL
+
+# Absolute caps on constraint-norm-adjusted primal infeasibility and negative
+# duality gap. Normalized checks alone allow O(1..100) primal constraint
+# violations or reversed witness gaps when problem magnitudes reach 1e10+.
+# Capping both at 1e-4 preserves legitimate IEEE-754 float64 rounding while
+# rejecting substantially infeasible primal points or negative gaps.
+_MAX_ABS_PRIMAL_TOL = 1e-4
+_MAX_ABS_NEGATIVE_GAP = 1e-4
 
 __all__ = [
     "BoundValidationStatus",
@@ -228,10 +253,24 @@ class LPSolverResult:
                 f"success={self.success}"
             )
 
+        if isinstance(self.execution_time_seconds, bool) or not isinstance(
+            self.execution_time_seconds, Real
+        ):
+            raise TypeError(
+                "execution_time_seconds must be a real number, "
+                f"got {type(self.execution_time_seconds).__name__}"
+            )
         execution_time = float(self.execution_time_seconds)
-        if math.isnan(execution_time) or execution_time < 0.0:
-            raise ValueError(f"execution_time_seconds must be nonnegative, got {execution_time}")
-        object.__setattr__(self, "execution_time_seconds", execution_time)
+        if not math.isfinite(execution_time) or execution_time < 0.0:
+            raise ValueError(
+                "execution_time_seconds must be finite and nonnegative, "
+                f"got {execution_time}"
+            )
+        object.__setattr__(
+            self,
+            "execution_time_seconds",
+            0.0 if execution_time == 0.0 else execution_time,
+        )
 
         if self.solution is not None:
             solution = np.array(self.solution, dtype=np.float64, copy=True)
@@ -352,54 +391,210 @@ def _resolve_objective(
     return vector, None
 
 
-def _scaled_primal_residual(problem: LPProblem, x: FloatArray) -> float:
-    """Largest magnitude-scaled violation of the constraints at ``x``.
+@dataclass(frozen=True)
+class _PrimalResidualDiagnostics:
+    """Raw and normalized primal feasibility diagnostics for one vector ``x``.
 
-    Inequality violations are clamped at zero (slack is fine); equality and
-    bound violations use absolute values. Each violation is divided by the
-    local scale of its row (row 1-norm times variable magnitude, right-hand
-    side magnitude, or 1).
+    Attributes:
+        raw_residual: Maximum unscaled constraint or variable-bound violation.
+        normalized_residual: Maximum violation divided by each row's local
+            dot-product scale ``max(1.0, |row| @ |x|, |rhs|)`` (or bound scale
+            ``max(1.0, |bound|, |value|)``).
+        max_unit_row_residual: Maximum violation divided by row coefficient norm
+            ``max(1.0, ||row||_1)`` (1.0 for direct variable bounds), preventing
+            huge right-hand sides or bounds from masking large coordinate-space
+            infeasibility while remaining invariant to uniform row scaling.
     """
-    violations: list[float] = []
-    x_scale = max(1.0, float(np.max(np.abs(x))) if x.size else 1.0)
-    if problem.A_ub is not None:
-        slack = problem.A_ub @ x - problem.b_ub
-        for index, value in enumerate(slack):
-            if value > 0.0:
-                row_norm = float(np.linalg.norm(problem.A_ub[index], ord=1))
-                scale = max(1.0, row_norm * x_scale, abs(float(problem.b_ub[index])))
-                violations.append(float(value) / scale)
-    if problem.A_eq is not None:
-        residual = problem.A_eq @ x - problem.b_eq
-        for index, value in enumerate(residual):
-            row_norm = float(np.linalg.norm(problem.A_eq[index], ord=1))
-            scale = max(1.0, row_norm * x_scale, abs(float(problem.b_eq[index])))
-            violations.append(abs(float(value)) / scale)
+
+    raw_residual: float
+    normalized_residual: float
+    max_unit_row_residual: float
+
+
+@dataclass(frozen=True)
+class _DualityGapDiagnostics:
+    """Absolute and relative duality-gap diagnostics in the original direction."""
+
+    absolute_gap: float
+    relative_gap: float
+    scale: float
+
+
+@dataclass(frozen=True)
+class _DualDiagnostics:
+    """Internal breakdown of dual objective, stationarity, and sign checks."""
+
+    dual_objective: float
+    stationarity_violation: float
+    ineq_sign_violation: float
+    lb_sign_violation: float
+    ub_sign_violation: float
+    raw_ineq_sign_violation: float
+    raw_lb_sign_violation: float
+    raw_ub_sign_violation: float
+
+    @property
+    def sign_violation(self) -> float:
+        """Largest scaled multiplier sign violation across all families."""
+        return max(
+            self.ineq_sign_violation,
+            self.lb_sign_violation,
+            self.ub_sign_violation,
+        )
+
+    @property
+    def max_dual_residual(self) -> float:
+        """Combined dual residual exposed via ``LPSolverResult.max_dual_residual``."""
+        return max(self.stationarity_violation, self.sign_violation)
+
+
+def _linear_row_violations(
+    matrix: FloatArray,
+    rhs: FloatArray,
+    x: FloatArray,
+    *,
+    equality: bool,
+) -> tuple[float, float, float]:
+    """Return ``(max_raw, max_normalized, max_unit_row)`` linear row violations."""
+    diff = matrix @ x - rhs
+    abs_x = np.abs(x)
+    max_raw = 0.0
+    max_norm = 0.0
+    max_unit_row = 0.0
+    for index, raw_signed in enumerate(diff):
+        raw = abs(float(raw_signed)) if equality else float(raw_signed)
+        if raw <= 0.0:
+            continue
+        abs_row = np.abs(matrix[index])
+        row_norm = float(np.sum(abs_row))
+        row_abs_dot = float(abs_row @ abs_x) if x.size else 0.0
+        local_scale = max(1.0, row_abs_dot, abs(float(rhs[index])))
+        coeff_scale = max(1.0, row_norm)
+        max_raw = max(max_raw, raw)
+        max_norm = max(max_norm, raw / local_scale)
+        max_unit_row = max(max_unit_row, raw / coeff_scale)
+    return max_raw, max_norm, max_unit_row
+
+
+def _primal_residual_diagnostics(
+    problem: LPProblem, x: FloatArray
+) -> _PrimalResidualDiagnostics:
+    """Compute raw and row-locally normalized primal residuals at ``x``.
+
+    Unlike global ``x_scale = max(|x|)`` normalization, row scaling uses the
+    exact inner-product magnitude ``|row| @ |x|`` so unrelated large variables
+    cannot inflate the scale of rows in which they have zero coefficients.
+    """
+    max_raw = 0.0
+    max_norm = 0.0
+    max_unit_row = 0.0
+
+    if problem.A_ub is not None and problem.b_ub is not None:
+        raw, norm, unit_row = _linear_row_violations(
+            problem.A_ub, problem.b_ub, x, equality=False
+        )
+        max_raw = max(max_raw, raw)
+        max_norm = max(max_norm, norm)
+        max_unit_row = max(max_unit_row, unit_row)
+
+    if problem.A_eq is not None and problem.b_eq is not None:
+        raw, norm, unit_row = _linear_row_violations(
+            problem.A_eq, problem.b_eq, x, equality=True
+        )
+        max_raw = max(max_raw, raw)
+        max_norm = max(max_norm, norm)
+        max_unit_row = max(max_unit_row, unit_row)
+
     for index, (lower, upper) in enumerate(problem.variable_bounds):
         value = float(x[index])
         if lower is not None and value < lower:
-            violations.append((lower - value) / max(1.0, abs(lower), abs(value)))
+            raw = lower - value
+            local_scale = max(1.0, abs(lower), abs(value))
+            max_raw = max(max_raw, raw)
+            max_norm = max(max_norm, raw / local_scale)
+            max_unit_row = max(max_unit_row, raw)
         if upper is not None and value > upper:
-            violations.append((value - upper) / max(1.0, abs(upper), abs(value)))
-    return max(violations, default=0.0)
+            raw = value - upper
+            local_scale = max(1.0, abs(upper), abs(value))
+            max_raw = max(max_raw, raw)
+            max_norm = max(max_norm, raw / local_scale)
+            max_unit_row = max(max_unit_row, raw)
+
+    return _PrimalResidualDiagnostics(
+        raw_residual=max_raw,
+        normalized_residual=max_norm,
+        max_unit_row_residual=max_unit_row,
+    )
+
+
+def _scaled_primal_residual(problem: LPProblem, x: FloatArray) -> float:
+    """Largest row-locally normalized violation of the constraints at ``x``."""
+    return _primal_residual_diagnostics(problem, x).normalized_residual
+
+
+def _multiplier_sign_violation(
+    multipliers: NDArray[np.float64],
+    *,
+    nonpositive: bool,
+) -> tuple[float, float]:
+    """Compute ``(scaled_violation, raw_violation)`` for one multiplier family.
+
+    Each multiplier family (``y``, ``lambda_lb``, ``lambda_ub``) uses its own
+    scale ``min(max(1.0, ||m||_inf), _MAX_MULTIPLIER_SIGN_SCALE)`` and never
+    depends on ``abs(dual)`` or any other multiplier vector. Bounding the
+    denominator at ``_MAX_MULTIPLIER_SIGN_SCALE`` prevents large objectives from
+    masking substantial wrong-sign multipliers exceeding ``_MAX_ABS_DUAL_SIGN_TOL``.
+    """
+    if not multipliers.size:
+        return 0.0, 0.0
+    raw = (
+        max(0.0, float(np.max(multipliers)))
+        if nonpositive
+        else max(0.0, -float(np.min(multipliers)))
+    )
+    if raw <= 0.0:
+        return 0.0, 0.0
+    family_norm = float(np.max(np.abs(multipliers)))
+    effective_scale = min(max(1.0, family_norm), _MAX_MULTIPLIER_SIGN_SCALE)
+    return raw / effective_scale, raw
+
+
+def _duality_gap_diagnostics(
+    primal_value: float, conservative: float, maximize: bool
+) -> _DualityGapDiagnostics:
+    """Compute absolute and relative duality gap in the original problem direction.
+
+    In minimization the gap is ``primal_value - conservative`` (primal upper
+    witness minus dual lower bound); in maximization it is
+    ``conservative - primal_value`` (dual upper bound minus primal lower
+    witness). Both share the convention ``upper_bound - lower_bound >= 0``.
+    """
+    absolute_gap = (
+        conservative - primal_value if maximize else primal_value - conservative
+    )
+    scale = max(1.0, abs(primal_value), abs(conservative))
+    return _DualityGapDiagnostics(
+        absolute_gap=absolute_gap,
+        relative_gap=absolute_gap / scale,
+        scale=scale,
+    )
 
 
 def _dual_diagnostics(
     problem: LPProblem,
     marginals: Optional[tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]],
     objective: FloatArray,
-) -> Optional[tuple[float, float, float]]:
+) -> Optional[_DualDiagnostics]:
     """Validate dual feasibility from solver marginals.
 
     ``marginals`` is ``(y, nu, lambda_lb, lambda_ub)`` with the
     empirically verified HiGHS conventions: ``y <= 0``, ``lambda_lb >= 0``,
     ``lambda_ub <= 0``, dual objective ``b_ub @ y + b_eq @ nu +
     l @ lambda_lb + u @ lambda_ub``, stationarity ``A_ub.T @ y +
-    A_eq.T @ nu + lambda_lb + lambda_ub == objective``. Returns
-    ``(dual_objective, stationarity_violation, sign_violation)`` or
-    ``None`` when the marginals are absent or wrongly shaped (dual
-    information unavailable). All quantities are in the supplied (solved)
-    direction.
+    A_eq.T @ nu + lambda_lb + lambda_ub == objective``. Returns a
+    :class:`_DualDiagnostics` record or ``None`` when the marginals are
+    absent, non-finite, or wrongly shaped. All quantities are in the
+    supplied (solved) direction.
     """
     if marginals is None:
         return None
@@ -448,18 +643,21 @@ def _dual_diagnostics(
     )
     stationarity = float(np.max(np.abs(residual))) / scale if residual.size else 0.0
 
-    # Sign feasibility: y <= 0, lambda_lb >= 0, lambda_ub <= 0.
-    sign = 0.0
-    if y.size:
-        sign = max(sign, float(np.max(y)))
-    if lambda_lb.size:
-        sign = max(sign, -float(np.min(lambda_lb)))
-    if lambda_ub.size:
-        sign = max(sign, float(np.max(lambda_ub)))
-    dual_scale = max(1.0, abs(dual))
-    sign_violation = sign / dual_scale if sign > 0.0 else 0.0
+    # Independent multiplier-specific sign feasibility: never scale by abs(dual).
+    ineq_sign, raw_ineq_sign = _multiplier_sign_violation(y, nonpositive=True)
+    lb_sign, raw_lb_sign = _multiplier_sign_violation(lambda_lb, nonpositive=False)
+    ub_sign, raw_ub_sign = _multiplier_sign_violation(lambda_ub, nonpositive=True)
 
-    return dual, stationarity, sign_violation
+    return _DualDiagnostics(
+        dual_objective=dual,
+        stationarity_violation=stationarity,
+        ineq_sign_violation=ineq_sign,
+        lb_sign_violation=lb_sign,
+        ub_sign_violation=ub_sign,
+        raw_ineq_sign_violation=raw_ineq_sign,
+        raw_lb_sign_violation=raw_lb_sign,
+        raw_ub_sign_violation=raw_ub_sign,
+    )
 
 
 def _extract_marginals(result: Any) -> Optional[
@@ -659,7 +857,7 @@ def solve_lp(
                 f"{raw_message} (no usable solution point)",
             )
         primal_value = float(original_objective @ point)
-        primal_residual = _scaled_primal_residual(problem, point)
+        primal_diag = _primal_residual_diagnostics(problem, point)
         return LPSolverResult(
             status=status,
             success=False,
@@ -669,13 +867,15 @@ def solve_lp(
             objective_value=primal_value,
             conservative_bound=None,
             duality_gap=None,
-            max_primal_residual=primal_residual,
+            max_primal_residual=primal_diag.normalized_residual,
             max_dual_residual=None,
             validation_status=BoundValidationStatus.UNVALIDATED,
             execution_time_seconds=elapsed,
             message=(
                 f"{raw_message}; solution is a primal witness only, "
-                "never treated as optimal"
+                "never treated as optimal "
+                f"(primal_norm={primal_diag.normalized_residual:.3e}, "
+                f"primal_raw={primal_diag.raw_residual:.3e})"
             ),
         )
 
@@ -757,45 +957,84 @@ def _assemble_optimal(
         )
 
     primal_value = float(original_objective @ point)
-    primal_residual = _scaled_primal_residual(problem, point)
+    primal_diag = _primal_residual_diagnostics(problem, point)
+    primal_residual = primal_diag.normalized_residual
     marginals = _extract_marginals(raw)
-    dual_info = _dual_diagnostics(problem, marginals, solve_objective)
+    dual_diag = _dual_diagnostics(problem, marginals, solve_objective)
 
-    dual_objective: Optional[float] = None
+    conservative: Optional[float] = None
     max_dual_residual: Optional[float] = None
-    if dual_info is not None:
-        dual_objective, stationarity, sign_violation = dual_info
-        max_dual_residual = max(stationarity, sign_violation)
-        if maximize:
-            conservative = -dual_objective
-        else:
-            conservative = dual_objective
-    else:
-        conservative = None
-
+    gap_diag: Optional[_DualityGapDiagnostics] = None
     gap: Optional[float] = None
-    if conservative is not None:
-        # Gap in the original direction: upper_bound - lower_bound, which is
-        # nonnegative for any feasible primal/dual pair.
-        if maximize:
-            gap = conservative - primal_value
-        else:
-            gap = primal_value - conservative
-
-    validation = BoundValidationStatus.UNVALIDATED
-    detail = "numerical validation FAILED"
-    if (
-        dual_info is not None
-        and primal_residual <= _VALIDATION_TOL
-        and max_dual_residual <= _VALIDATION_TOL
-        and gap >= -_VALIDATION_TOL * max(1.0, abs(primal_value), abs(conservative))
-    ):
-        validation = BoundValidationStatus.VALIDATED
-        detail = (
-            f"numerical validation PASSED (primal residual "
-            f"{primal_residual:.3e}, dual residual {max_dual_residual:.3e}, "
-            f"gap {gap:.3e})"
+    if dual_diag is not None:
+        max_dual_residual = dual_diag.max_dual_residual
+        conservative = (
+            -dual_diag.dual_objective if maximize else dual_diag.dual_objective
         )
+        gap_diag = _duality_gap_diagnostics(primal_value, conservative, maximize)
+        gap = gap_diag.absolute_gap
+
+    failures: list[str] = []
+    if primal_diag.normalized_residual > _VALIDATION_TOL:
+        failures.append(
+            f"normalized primal residual {primal_diag.normalized_residual:.3e} > "
+            f"{_VALIDATION_TOL:.3e} (raw {primal_diag.raw_residual:.3e})"
+        )
+    if primal_diag.max_unit_row_residual > _MAX_ABS_PRIMAL_TOL:
+        failures.append(
+            f"unit-row primal residual {primal_diag.max_unit_row_residual:.3e} > "
+            f"{_MAX_ABS_PRIMAL_TOL:.3e} (raw {primal_diag.raw_residual:.3e}, "
+            f"normalized {primal_diag.normalized_residual:.3e})"
+        )
+    if dual_diag is None:
+        failures.append("dual marginals unavailable or invalid")
+    else:
+        if dual_diag.stationarity_violation > _VALIDATION_TOL:
+            failures.append(
+                f"dual stationarity residual {dual_diag.stationarity_violation:.3e} > "
+                f"{_VALIDATION_TOL:.3e}"
+            )
+        if dual_diag.ineq_sign_violation > _VALIDATION_TOL:
+            failures.append(
+                f"inequality multiplier sign violation {dual_diag.ineq_sign_violation:.3e} > "
+                f"{_VALIDATION_TOL:.3e} (raw {dual_diag.raw_ineq_sign_violation:.3e})"
+            )
+        if dual_diag.lb_sign_violation > _VALIDATION_TOL:
+            failures.append(
+                f"lower-bound multiplier sign violation {dual_diag.lb_sign_violation:.3e} > "
+                f"{_VALIDATION_TOL:.3e} (raw {dual_diag.raw_lb_sign_violation:.3e})"
+            )
+        if dual_diag.ub_sign_violation > _VALIDATION_TOL:
+            failures.append(
+                f"upper-bound multiplier sign violation {dual_diag.ub_sign_violation:.3e} > "
+                f"{_VALIDATION_TOL:.3e} (raw {dual_diag.raw_ub_sign_violation:.3e})"
+            )
+    if gap_diag is not None:
+        if gap_diag.relative_gap < -_VALIDATION_TOL:
+            failures.append(
+                f"negative relative duality gap {gap_diag.relative_gap:.3e} < "
+                f"-{_VALIDATION_TOL:.3e} (abs_gap {gap_diag.absolute_gap:.3e})"
+            )
+        if gap_diag.absolute_gap < -_MAX_ABS_NEGATIVE_GAP:
+            failures.append(
+                f"negative absolute duality gap {gap_diag.absolute_gap:.3e} < "
+                f"-{_MAX_ABS_NEGATIVE_GAP:.3e} (rel_gap {gap_diag.relative_gap:.3e})"
+            )
+
+    if not failures:
+        validation = BoundValidationStatus.VALIDATED
+        assert gap_diag is not None
+        detail = (
+            "numerical validation PASSED ("
+            f"primal_norm={primal_diag.normalized_residual:.3e}, "
+            f"primal_raw={primal_diag.raw_residual:.3e}, "
+            f"dual_residual={max_dual_residual:.3e}, "
+            f"abs_gap={gap_diag.absolute_gap:.3e}, "
+            f"rel_gap={gap_diag.relative_gap:.3e})"
+        )
+    else:
+        validation = BoundValidationStatus.UNVALIDATED
+        detail = f"numerical validation FAILED ({'; '.join(failures)})"
     message = f"{raw_message}; {detail}"
 
     return LPSolverResult(

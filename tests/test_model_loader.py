@@ -209,3 +209,37 @@ def test_sequential_subclass_with_custom_forward_is_rejected() -> None:
 
     with pytest.raises(UnsupportedModelError, match="overrides standard sequential"):
         extract_network(ScaledSequential(nn.Linear(4, 2)))
+
+
+# ==============================================================================
+# Consecutive ReLU rejection
+# ==============================================================================
+
+
+def test_consecutive_relu_layers_are_rejected() -> None:
+    """Two back-to-back nn.ReLU modules must raise UnsupportedLayerError.
+
+    relu(relu(x)) = relu(x) is mathematically redundant, and the consecutive
+    topology is not part of the supported Linear/ReLU architecture.  Rejecting
+    it explicitly avoids silent mis-encoding in the LP formulation.
+    """
+    model = nn.Sequential(nn.Linear(4, 3), nn.ReLU(), nn.ReLU(), nn.Linear(3, 2))
+    with pytest.raises(UnsupportedLayerError, match="Consecutive ReLU layers"):
+        extract_network(model)
+
+
+def test_consecutive_relu_at_start_is_rejected() -> None:
+    """Two ReLUs with no preceding Linear are also rejected."""
+    model = nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.ReLU())
+    with pytest.raises(UnsupportedLayerError, match="Consecutive ReLU layers"):
+        extract_network(model)
+
+
+def test_non_consecutive_relu_layers_are_accepted() -> None:
+    """Linear → ReLU → Linear → ReLU is the standard architecture and must succeed."""
+    model = nn.Sequential(
+        nn.Linear(4, 3), nn.ReLU(), nn.Linear(3, 2), nn.ReLU(), nn.Linear(2, 1)
+    )
+    representation = extract_network(model)
+    types = [type(layer) for layer in representation.layers]
+    assert types == [LinearLayer, ReLULayer, LinearLayer, ReLULayer, LinearLayer]
