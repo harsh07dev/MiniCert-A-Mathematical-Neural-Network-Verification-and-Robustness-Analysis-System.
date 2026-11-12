@@ -1,0 +1,286 @@
+uid=1_1 RootWebArea "MiniCert Verification Dashboard" focusable focused url="http://localhost:8765/"
+  uid=1_2 link "Skip to main content" focusable url="http://localhost:8765/#stMain"
+    uid=1_3 StaticText "Skip to main content"
+  uid=1_4 banner
+    uid=1_5 button "Deploy" focusable invalid="false"
+    uid=1_6 button "Main menu" expandable focusable hasPopup="menu" invalid="false"
+  uid=1_7 main focusable focused
+    uid=1_8 StaticText "MiniCert Verification Dashboard"
+    uid=1_9 link "Link to heading" focusable url="http://localhost:8765/#mini-cert-verification-dashboard"
+    uid=1_10 StaticText "Mathematical neural-network verification and robustness analysis: certify MNIST predictions under L-infinity input perturbations."
+    uid=1_11 StaticText "Overview"
+    uid=1_12 link "Link to heading" focusable url="http://localhost:8765/#overview"
+    uid=1_13 StaticText "Architecture"
+    uid=1_14 StaticText "784 → 64 → 32 → 10"
+    uid=1_15 StaticText "Dataset"
+    uid=1_16 StaticText "MNIST test"
+    uid=1_17 StaticText "Input / output features"
+    uid=1_18 StaticText "784 / 10"
+    uid=1_19 StaticText "Model"
+    uid=1_20 StaticText "MiniCertNet"
+    uid=1_21 StaticText "Verification method:"
+    uid=1_22 StaticText "Interval Bound Propagation (IBP)"
+    uid=1_23 StaticText "Refinement method:"
+    uid=1_24 StaticText "LP-based Planet/triangle relaxation"
+    uid=1_25 StaticText "Nominal accuracy reference:"
+    uid=1_26 StaticText "the trained MiniCertNet achieves 96.44% MNIST test accuracy."
+    uid=1_27 StaticText "Experiment status:"
+    uid=1_28 StaticText "no experiment has been run in this session yet."
+    uid=1_29 DisclosureTriangle "What does certification mean?" expandable focusable
+    uid=1_30 StaticText "Individual verification"
+    uid=1_31 link "Link to heading" focusable url="http://localhost:8765/#individual-verification"
+    uid=1_32 spinbutton "MNIST test sample index" editable="plaintext" focusable invalid="false" settable value="0" valuemax="9999" valuemin="0" valuetext="0"
+    uid=1_33 button "Decrement" disableable disabled invalid="false"
+    uid=1_34 button "Increment" focusable invalid="false"
+    uid=1_35 slider "Epsilon (L-infinity radius) Epsilon (L-infinity radius)" focusable invalid="false" orientation="horizontal" settable value="0.03999999910593033" valuemax="0.20000000298023224" valuemin="0" valuetext="0.04"
+    uid=1_36 StaticText "0.04"
+    uid=1_37 StaticText "0.00"
+    uid=1_38 StaticText "0.20"
+    uid=1_39 button "Fullscreen: Sample 0" focusable invalid="false"
+    uid=1_40 StaticText "Sample 0"
+    uid=1_41 StaticText "Actual label:"
+    uid=1_42 StaticText "7"
+    uid=1_43 StaticText "Model prediction:"
+    uid=1_44 StaticText "7"
+    uid=1_45 StaticText "Target class for verification:"
+    uid=1_46 StaticText "7"
+    uid=1_47 StaticText "CERTIFIED means the target class provably dominates all competitors for every input in the perturbation region. INCONCLUSIVE means the bounds are too loose to prove that; it is never a claim that the network is unsafe."
+    uid=1_48 button "Run baseline IBP verification" focusable invalid="false"
+    uid=1_49 button "Run refined IBP + LP verification" focusable invalid="false"
+    uid=1_50 StaticText "Baseline IBP result"
+    uid=1_51 link "Link to heading" focusable url="http://localhost:8765/#baseline-ibp-result"
+    uid=1_52 StaticText "INCONCLUSIVE"
+    uid=1_53 StaticText "Certification margin"
+    uid=1_54 StaticText "-42.37"
+    uid=1_55 StaticText "Target class"
+    uid=1_56 StaticText "7"
+    uid=1_57 StaticText "Baseline time (s)"
+    uid=1_58 StaticText "0.001601"
+    uid=1_59 StaticText "Baseline output bounds"
+    uid=1_60 button "Show/hide columns" focusable invalid="false"
+    uid=1_61 button "Download as CSV" focusable invalid="false"
+    uid=1_62 button "Search" focusable invalid="false"
+    uid=1_63 button "Fullscreen" focusable invalid="false"
+    uid=1_64 Canvas focusable
+      uid=1_65 columnheader "class" focusable selectable
+        uid=1_66 StaticText "class"
+      uid=1_67 columnheader "lower" focusable selectable
+        uid=1_68 StaticText "lower"
+      uid=1_69 columnheader "upper" focusable selectable
+        uid=1_70 StaticText "upper"
+      uid=1_71 columnheader "width" focusable selectable
+        uid=1_72 StaticText "width"
+      uid=1_73 gridcell "0" focusable readonly selectable
+        uid=1_74 StaticText "0"
+      uid=1_75 gridcell "-28.041570747127892" focusable readonly selectable
+        uid=1_76 StaticText "-28.041570747127892"
+      uid=1_77 gridcell "13.605736567873517" focusable readonly selectable
+        uid=1_78 StaticText "13.605736567873517"
+      uid=1_79 gridcell "41.64730731500141" focusable readonly selectable
+        uid=1_80 StaticText "41.64730731500141"
+      uid=1_81 gridcell "1" focusable readonly selectable
+        uid=1_82 StaticText "1"
+      uid=1_83 gridcell "-39.94179250300977" focusable readonly selectable
+        uid=1_84 StaticText "-39.94179250300977"
+      uid=1_85 gridcell "16.535072427864552" focusable readonly selectable
+        uid=1_86 StaticText "16.535072427864552"
+      uid=1_87 gridcell "56.47686493087433" focusable readonly selectable
+        uid=1_88 StaticText "56.47686493087433"
+      uid=1_89 gridcell "2" focusable readonly selectable
+        uid=1_90 StaticText "2"
+      uid=1_91 gridcell "-23.6347526869883" focusable readonly selectable
+        uid=1_92 StaticText "-23.6347526869883"
+      uid=1_93 gridcell "16.6318795744644" focusable readonly selectable
+        uid=1_94 StaticText "16.6318795744644"
+      uid=1_95 gridcell "40.2666322614527" focusable readonly selectable
+        uid=1_96 StaticText "40.2666322614527"
+      uid=1_97 gridcell "3" focusable readonly selectable
+        uid=1_98 StaticText "3"
+      uid=1_99 gridcell "-19.49130571853926" focusable readonly selectable
+        uid=1_100 StaticText "-19.49130571853926"
+      uid=1_101 gridcell "18.01078973969419" focusable readonly selectable
+        uid=1_102 StaticText "18.01078973969419"
+      uid=1_103 gridcell "37.50209545823345" focusable readonly selectable
+        uid=1_104 StaticText "37.50209545823345"
+      uid=1_105 gridcell "4" focusable readonly selectable
+        uid=1_106 StaticText "4"
+      uid=1_107 gridcell "-42.61331104619421" focusable readonly selectable
+        uid=1_108 StaticText "-42.61331104619421"
+      uid=1_109 gridcell "15.690724719477423" focusable readonly selectable
+        uid=1_110 StaticText "15.690724719477423"
+      uid=1_111 gridcell "58.304035765671635" focusable readonly selectable
+        uid=1_112 StaticText "58.304035765671635"
+      uid=1_113 gridcell "5" focusable readonly selectable
+        uid=1_114 StaticText "5"
+      uid=1_115 gridcell "-26.81780588713834" focusable readonly selectable
+        uid=1_116 StaticText "-26.81780588713834"
+      uid=1_117 gridcell "17.675649670033074" focusable readonly selectable
+        uid=1_118 StaticText "17.675649670033074"
+      uid=1_119 gridcell "44.493455557171416" focusable readonly selectable
+        uid=1_120 StaticText "44.493455557171416"
+      uid=1_121 gridcell "6" focusable readonly selectable
+        uid=1_122 StaticText "6"
+      uid=1_123 gridcell "-41.81993182560883" focusable readonly selectable
+        uid=1_124 StaticText "-41.81993182560883"
+      uid=1_125 gridcell "9.379069054686473" focusable readonly selectable
+        uid=1_126 StaticText "9.379069054686473"
+      uid=1_127 gridcell "51.19900088029531" focusable readonly selectable
+        uid=1_128 StaticText "51.19900088029531"
+      uid=1_129 gridcell "7" focusable readonly selectable
+        uid=1_130 StaticText "7"
+      uid=1_131 gridcell "-24.354901882057987" focusable readonly selectable
+        uid=1_132 StaticText "-24.354901882057987"
+      uid=1_133 gridcell "27.70711358833712" focusable readonly selectable
+        uid=1_134 StaticText "27.70711358833712"
+      uid=1_135 gridcell "52.06201547039511" focusable readonly selectable
+        uid=1_136 StaticText "52.06201547039511"
+      uid=1_137 gridcell "8" focusable readonly selectable
+        uid=1_138 StaticText "8"
+      uid=1_139 gridcell "-29.738108400383407" focusable readonly selectable
+        uid=1_140 StaticText "-29.738108400383407"
+      uid=1_141 gridcell "12.988910466258156" focusable readonly selectable
+        uid=1_142 StaticText "12.988910466258156"
+      uid=1_143 gridcell "42.727018866641565" focusable readonly selectable
+        uid=1_144 StaticText "42.727018866641565"
+      uid=1_145 gridcell "9" focusable readonly selectable
+        uid=1_146 StaticText "9"
+      uid=1_147 gridcell "-32.83282604482681" focusable readonly selectable
+        uid=1_148 StaticText "-32.83282604482681"
+      uid=1_149 gridcell "17.371506918746988" focusable readonly selectable
+        uid=1_150 StaticText "17.371506918746988"
+      uid=1_151 gridcell "50.2043329635738" focusable readonly selectable
+        uid=1_152 StaticText "50.2043329635738"
+    uid=1_153 StaticText "Refined IBP + LP result"
+    uid=1_154 link "Link to heading" focusable url="http://localhost:8765/#refined-ibp-lp-result"
+    uid=1_155 StaticText "Run the refined verification button to see LP results."
+    uid=1_156 StaticText "Experimental evaluation"
+    uid=1_157 link "Link to heading" focusable url="http://localhost:8765/#experimental-evaluation"
+    uid=1_158 spinbutton "Sample count" editable="plaintext" focusable invalid="false" settable value="100" valuemax="10000" valuemin="1" valuetext="100"
+    uid=1_159 button "Decrement" focusable invalid="false"
+    uid=1_160 button "Increment" focusable invalid="false"
+    uid=1_161 textbox "Epsilons (comma-separated)" editable="plaintext" focusable invalid="false" settable value="0.01, 0.03, 0.05, 0.1"
+    uid=1_162 spinbutton "Random seed" editable="plaintext" focusable invalid="false" settable value="42" valuemax="2147483648" valuemin="0" valuetext="42"
+    uid=1_163 button "Decrement" focusable invalid="false"
+    uid=1_164 button "Increment" focusable invalid="false"
+    uid=1_165 StaticText "Experiments verify every selected sample with both methods at every epsilon. Large configurations can take several minutes."
+    uid=1_166 button "Run development experiment (5 samples, epsilon 0.03)" focusable invalid="false"
+    uid=1_167 button "Run configured experiment" focusable invalid="false"
+    uid=1_168 StaticText "Experiment completed."
+    uid=1_169 StaticText "Results and visualizations"
+    uid=1_170 link "Link to heading" focusable url="http://localhost:8765/#results-and-visualizations"
+    uid=1_171 StaticText "Experiment 'evaluation_seed42_n5': 5 correctly classified samples, 1 incorrectly classified samples excluded, 10000 test samples in the split."
+    uid=1_172 StaticText "Baseline certified @ eps 0.03"
+    uid=1_173 StaticText "0%"
+    uid=1_174 StaticText "Refined certified @ eps 0.03"
+    uid=1_175 StaticText "0%"
+    uid=1_176 StaticText "Improvement @ eps 0.03"
+    uid=1_177 StaticText "0 pp"
+    uid=1_178 StaticText "Errors @ eps 0.03"
+    uid=1_179 StaticText "0"
+    uid=1_180 StaticText "Certification rate comparison"
+    uid=1_181 link "Link to heading" focusable url="http://localhost:8765/#certification-rate-comparison"
+    uid=1_182 button "Fullscreen" focusable invalid="false"
+    uid=1_183 StaticText "Output interval width"
+    uid=1_184 link "Link to heading" focusable url="http://localhost:8765/#output-interval-width"
+    uid=1_185 button "Fullscreen" focusable invalid="false"
+    uid=1_186 StaticText "Runtime comparison"
+    uid=1_187 link "Link to heading" focusable url="http://localhost:8765/#runtime-comparison"
+    uid=1_188 button "Fullscreen" focusable invalid="false"
+    uid=1_189 StaticText "Certification improvement"
+    uid=1_190 link "Link to heading" focusable url="http://localhost:8765/#certification-improvement"
+    uid=1_191 button "Fullscreen" focusable invalid="false"
+    uid=1_192 StaticText "Per-sample results"
+    uid=1_193 link "Link to heading" focusable url="http://localhost:8765/#per-sample-results"
+    uid=1_194 button "Show/hide columns" focusable invalid="false"
+    uid=1_195 button "Download as CSV" focusable invalid="false"
+    uid=1_196 button "Search" focusable invalid="false"
+    uid=1_197 button "Fullscreen" focusable invalid="false"
+    uid=1_198 Canvas focusable
+      uid=1_199 columnheader "sample_index" focusable selectable
+        uid=1_200 StaticText "sample_index"
+      uid=1_201 columnheader "label" focusable selectable
+        uid=1_202 StaticText "label"
+      uid=1_203 columnheader "predicted" focusable selectable
+        uid=1_204 StaticText "predicted"
+      uid=1_205 columnheader "epsilon" focusable selectable
+        uid=1_206 StaticText "epsilon"
+      uid=1_207 columnheader "baseline_status" focusable selectable
+        uid=1_208 StaticText "baseline_status"
+      uid=1_209 columnheader "baseline_margin" focusable selectable
+        uid=1_210 StaticText "baseline_margin"
+      uid=1_211 columnheader "baseline_time_seconds" focusable selectable
+        uid=1_212 StaticText "baseline_time_seconds"
+      uid=1_213 gridcell "3771" focusable readonly selectable
+        uid=1_214 StaticText "3771"
+      uid=1_215 gridcell "8" focusable readonly selectable
+        uid=1_216 StaticText "8"
+      uid=1_217 gridcell "8" focusable readonly selectable
+        uid=1_218 StaticText "8"
+      uid=1_219 gridcell "0.03" focusable readonly selectable
+        uid=1_220 StaticText "0.03"
+      uid=1_221 gridcell "INCONCLUSIVE" focusable readonly selectable
+        uid=1_222 StaticText "INCONCLUSIVE"
+      uid=1_223 gridcell "-39.11" focusable readonly selectable
+        uid=1_224 StaticText "-39.11"
+      uid=1_225 gridcell "0.0004068" focusable readonly selectable
+        uid=1_226 StaticText "0.0004068"
+      uid=1_227 gridcell "6672" focusable readonly selectable
+        uid=1_228 StaticText "6672"
+      uid=1_229 gridcell "0" focusable readonly selectable
+        uid=1_230 StaticText "0"
+      uid=1_231 gridcell "0" focusable readonly selectable
+        uid=1_232 StaticText "0"
+      uid=1_233 gridcell "0.03" focusable readonly selectable
+        uid=1_234 StaticText "0.03"
+      uid=1_235 gridcell "INCONCLUSIVE" focusable readonly selectable
+        uid=1_236 StaticText "INCONCLUSIVE"
+      uid=1_237 gridcell "-22.79" focusable readonly selectable
+        uid=1_238 StaticText "-22.79"
+      uid=1_239 gridcell "0.0005782" focusable readonly selectable
+        uid=1_240 StaticText "0.0005782"
+      uid=1_241 gridcell "7261" focusable readonly selectable
+        uid=1_242 StaticText "7261"
+      uid=1_243 gridcell "0" focusable readonly selectable
+        uid=1_244 StaticText "0"
+      uid=1_245 gridcell "0" focusable readonly selectable
+        uid=1_246 StaticText "0"
+      uid=1_247 gridcell "0.03" focusable readonly selectable
+        uid=1_248 StaticText "0.03"
+      uid=1_249 gridcell "INCONCLUSIVE" focusable readonly selectable
+        uid=1_250 StaticText "INCONCLUSIVE"
+      uid=1_251 gridcell "-23.61" focusable readonly selectable
+        uid=1_252 StaticText "-23.61"
+      uid=1_253 gridcell "0.0002627" focusable readonly selectable
+        uid=1_254 StaticText "0.0002627"
+      uid=1_255 gridcell "3779" focusable readonly selectable
+        uid=1_256 StaticText "3779"
+      uid=1_257 gridcell "1" focusable readonly selectable
+        uid=1_258 StaticText "1"
+      uid=1_259 gridcell "1" focusable readonly selectable
+        uid=1_260 StaticText "1"
+      uid=1_261 gridcell "0.03" focusable readonly selectable
+        uid=1_262 StaticText "0.03"
+      uid=1_263 gridcell "INCONCLUSIVE" focusable readonly selectable
+        uid=1_264 StaticText "INCONCLUSIVE"
+      uid=1_265 gridcell "-36.65" focusable readonly selectable
+        uid=1_266 StaticText "-36.65"
+      uid=1_267 gridcell "0.0002572" focusable readonly selectable
+        uid=1_268 StaticText "0.0002572"
+      uid=1_269 gridcell "1772" focusable readonly selectable
+        uid=1_270 StaticText "1772"
+      uid=1_271 gridcell "7" focusable readonly selectable
+        uid=1_272 StaticText "7"
+      uid=1_273 gridcell "7" focusable readonly selectable
+        uid=1_274 StaticText "7"
+      uid=1_275 gridcell "0.03" focusable readonly selectable
+        uid=1_276 StaticText "0.03"
+      uid=1_277 gridcell "INCONCLUSIVE" focusable readonly selectable
+        uid=1_278 StaticText "INCONCLUSIVE"
+      uid=1_279 gridcell "-28.23" focusable readonly selectable
+        uid=1_280 StaticText "-28.23"
+      uid=1_281 gridcell "0.0002584" focusable readonly selectable
+        uid=1_282 StaticText "0.0002584"
+    uid=1_283 StaticText "Export"
+    uid=1_284 link "Link to heading" focusable url="http://localhost:8765/#export"
+    uid=1_285 button "Download per-sample CSV" focusable invalid="false"
+    uid=1_286 button "Download aggregated JSON" focusable invalid="false"
