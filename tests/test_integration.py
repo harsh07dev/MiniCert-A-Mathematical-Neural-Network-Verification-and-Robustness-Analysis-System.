@@ -148,9 +148,9 @@ def test_complete_ibp_only_verification() -> None:
 
 
 def test_complete_lp_refined_verification() -> None:
-    # Default target selection refines every unstable ReLU post and both
-    # output neurons; the LP certifies the exact ranges and the verdict
-    # flips from INCONCLUSIVE to CERTIFIED.
+    # Default target selection refines both final-layer output neurons (both
+    # min and max); the LP certifies the exact ranges and the verdict flips
+    # from INCONCLUSIVE to CERTIFIED.
     network = _improvement_net()
     region = _improvement_region()
 
@@ -159,9 +159,13 @@ def test_complete_lp_refined_verification() -> None:
     assert result.ibp_result.status is VerificationStatus.INCONCLUSIVE
     assert result.ibp_result.verification_margin == pytest.approx(-1.0)
     assert result.refinement.status is RefinementStatus.TIGHTENED
-    assert result.refinement.num_targets == 6
-    assert result.refinement.num_accepted == 6
+    assert result.refinement.num_targets == 2
+    assert result.refinement.num_accepted == 2
     assert result.refinement.num_rejected == 0
+    assert result.refinement.target_neurons == (
+        NeuronRef(2, "pre", 0),
+        NeuronRef(2, "pre", 1),
+    )
     assert result.status is VerificationStatus.CERTIFIED
     assert result.refined_result.verification_margin == pytest.approx(0.5)
     assert result.refined_result.target_lower_bound == pytest.approx(1.0)
@@ -416,8 +420,17 @@ def test_default_target_selection_policy() -> None:
     improvement_trace = get_intermediate_bounds(improvement, _improvement_region())
     targets = select_refinement_targets(improvement, improvement_trace)
 
-    # 4 unstable ReLU post neurons + 2 final-layer pre neurons, all unique.
+    # Default policy targets only the final layer's output logits.
     assert targets == (
+        NeuronRef(2, "pre", 0),
+        NeuronRef(2, "pre", 1),
+    )
+
+    # Explicit opt-in includes unstable hidden ReLU post neurons + outputs.
+    full_targets = select_refinement_targets(
+        improvement, improvement_trace, include_hidden_relu=True
+    )
+    assert full_targets == (
         NeuronRef(1, "post", 0),
         NeuronRef(1, "post", 1),
         NeuronRef(1, "post", 2),
@@ -426,11 +439,15 @@ def test_default_target_selection_policy() -> None:
         NeuronRef(2, "pre", 1),
     )
 
-    # Design net: one unstable ReLU whose post neuron is also the final
-    # layer's output -> deduplicated to a single target.
+    # Design net: final layer is a ReLU -> both default and opt-in yield the
+    # single final-layer post neuron (deduplicated).
     design = _design_net()
     design_trace = get_intermediate_bounds(design, _region([0.0, 0.0], 1.0))
     assert select_refinement_targets(design, design_trace) == (NeuronRef(1, "post", 0),)
+    assert (
+        select_refinement_targets(design, design_trace, include_hidden_relu=True)
+        == (NeuronRef(1, "post", 0),)
+    )
 
     # Stable ReLUs contribute no ReLU targets; only the final layer remains.
     for stable in (_stable_active_net(), _stable_inactive_net()):
@@ -453,6 +470,141 @@ def test_default_target_selection_policy() -> None:
     assert select_refinement_targets(empty, empty_trace) == ()
 
 
+def _five_layer_ten_class_net() -> MathematicalNetwork:
+    """Deterministic 784 -> 64 -> ReLU -> 32 -> ReLU -> 10 net with unstable L1/L3 ReLUs."""
+    w0 = np.zeros((64, 784), dtype=np.float64)
+    b0 = np.zeros(64, dtype=np.float64)
+    w0[0, 0] = 1.0
+    b0[0] = -0.5
+    w0[1, 0] = -1.0
+    b0[1] = 0.5
+    for row in range(2, 8):
+        w0[row, row] = 1.0
+        b0[row] = -0.5
+
+    w2 = np.zeros((32, 64), dtype=np.float64)
+    b2 = np.zeros(32, dtype=np.float64)
+    for row in range(4):
+        w2[row, 0] = 1.0
+        w2[row, 1] = -1.0
+        w2[row, row + 2] = 0.5
+
+    w4 = np.zeros((10, 32), dtype=np.float64)
+    for cls in range(10):
+        w4[cls, 0] = 1.0 - 0.1 * cls
+        w4[cls, (cls % 3) + 1] = -0.5
+    b4 = np.linspace(0.5, -0.4, 10, dtype=np.float64)
+
+    return _make_network(
+        (
+            _make_linear(0, w0, b0),
+            ReLULayer(position=1),
+            _make_linear(2, w2, b2),
+            ReLULayer(position=3),
+            _make_linear(4, w4, b4),
+        ),
+        source_model="FiveLayerTenClassNet",
+    )
+
+
+def test_l4_default_target_selection_excludes_hidden_relus() -> None:
+    """Default selection picks all 10 Layer 4 logits and excludes Layer 1 and Layer 3."""
+    network = _five_layer_ten_class_net()
+    region = InputRegion(np.full(784, 0.5, dtype=np.float64), 0.5, input_lower=0.0, input_upper=1.0)
+    trace = get_intermediate_bounds(network, region)
+
+    default_targets = select_refinement_targets(network, trace)
+    assert default_targets == tuple(NeuronRef(4, "pre", j) for j in range(10))
+    assert all(ref.layer_index == 4 and ref.phase == "pre" for ref in default_targets)
+    assert all(ref.layer_index not in (1, 3) for ref in default_targets)
+
+    # Explicit opt-in includes unstable hidden neurons from Layer 1 and Layer 3.
+    hidden_targets = select_refinement_targets(network, trace, include_hidden_relu=True)
+    hidden_layers = {ref.layer_index for ref in hidden_targets}
+    assert {1, 3, 4}.issubset(hidden_layers)
+    assert tuple(ref for ref in hidden_targets if ref.layer_index == 4) == default_targets
+
+
+def test_l4_only_matches_full_target_bounds_verdict_and_full_output_vector() -> None:
+    """Default L4-only refinement matches full hidden+L4 opt-in bounds, statuses, and margins."""
+    for network, region, target_class in (
+        (_improvement_net(), _improvement_region(), 0),
+        (
+            _five_layer_ten_class_net(),
+            InputRegion(np.full(784, 0.5, dtype=np.float64), 0.5, input_lower=0.0, input_upper=1.0),
+            0,
+        ),
+    ):
+        l4_result = verify_robustness_refined(network, region, target_class=target_class)
+        full_result = verify_robustness_refined(
+            network, region, target_class=target_class, include_hidden_relu=True
+        )
+
+        # Complete output lower and upper bounds are refined and populated for all classes.
+        n_out = network.output_features
+        assert l4_result.refinement.num_targets == n_out
+        assert full_result.refinement.num_targets > n_out
+        assert l4_result.refined_trace.output_bounds.lower.shape == (n_out,)
+        assert l4_result.refined_trace.output_bounds.upper.shape == (n_out,)
+        for outcome in l4_result.refinement.outcomes:
+            assert outcome.lower_solve.maximize is False
+            assert outcome.upper_solve.maximize is True
+
+        # Bounds, status, and margin match the full-target strategy within tolerance.
+        np.testing.assert_allclose(
+            l4_result.refined_trace.output_bounds.lower,
+            full_result.refined_trace.output_bounds.lower,
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            l4_result.refined_trace.output_bounds.upper,
+            full_result.refined_trace.output_bounds.upper,
+            atol=1e-9,
+        )
+        assert l4_result.refined_result.status is full_result.refined_result.status
+        assert l4_result.refined_result.verification_margin == pytest.approx(
+            full_result.refined_result.verification_margin, abs=1e-9
+        )
+
+
+def test_default_l4_path_preserves_validation_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default target selection rejects UNVALIDATED solver results without applying them."""
+    import verification.refinement as refinement_module
+    from verification.lp_solver import BoundValidationStatus, LPSolverStatus
+
+    network = _improvement_net()
+    region = _improvement_region()
+
+    def fake_unvalidated(problem, objective=None, *, maximize=False, **kwargs):
+        neuron = objective if isinstance(objective, NeuronRef) else problem.objective_neuron
+        return LPSolverResult(
+            status=LPSolverStatus.OPTIMAL,
+            success=True,
+            maximize=maximize,
+            objective_neuron=neuron,
+            solution=None,
+            objective_value=0.0,
+            conservative_bound=None,
+            duality_gap=None,
+            max_primal_residual=None,
+            max_dual_residual=None,
+            validation_status=BoundValidationStatus.UNVALIDATED,
+            execution_time_seconds=0.0,
+            message="validation failed",
+        )
+
+    monkeypatch.setattr(refinement_module, "solve_lp", fake_unvalidated)
+    result = verify_robustness_refined(network, region, target_class=0)
+
+    assert result.refinement.num_targets == 2
+    assert result.refinement.num_accepted == 0
+    assert result.refinement.num_rejected == 2
+    assert result.refinement.refined_bounds == ()
+    assert result.status is VerificationStatus.INCONCLUSIVE
+
+
 def test_default_target_selection_validates_arguments() -> None:
     network = _design_net()
     trace = get_intermediate_bounds(network, _region([0.0, 0.0], 1.0))
@@ -462,6 +614,8 @@ def test_default_target_selection_validates_arguments() -> None:
         select_refinement_targets(object(), trace)
     with pytest.raises(TypeError):
         select_refinement_targets(network, object())
+    with pytest.raises(TypeError, match="include_hidden_relu must be a bool"):
+        select_refinement_targets(network, trace, include_hidden_relu="yes")  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         select_refinement_targets(network, get_intermediate_bounds(other, _region([0.5, 0.1], 0.05)))
 
@@ -491,6 +645,18 @@ def test_argument_validation() -> None:
         # A bare NeuronRef is not a tuple/list of targets.
         verify_robustness_refined(
             network, region, target_class=0, target_neurons=NeuronRef(0, "pre", 0)
+        )
+    with pytest.raises(TypeError, match="include_hidden_relu must be a bool"):
+        verify_robustness_refined(
+            network, region, target_class=0, include_hidden_relu=1  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="cannot be combined with explicit target_neurons"):
+        verify_robustness_refined(
+            network,
+            region,
+            target_class=0,
+            target_neurons=[NeuronRef(0, "pre", 0)],
+            include_hidden_relu=True,
         )
 
 

@@ -120,16 +120,20 @@ def _check(box: object, target_class: int, epsilon: float) -> VerificationResult
 def select_refinement_targets(
     network: MathematicalNetwork,
     intermediate_bounds: IntermediateBounds,
+    *,
+    include_hidden_relu: bool = False,
 ) -> tuple[NeuronRef, ...]:
     """Select the default Phase 3 refinement targets for a network trace.
 
-    The default policy refines:
-    - every unstable ReLU neuron's post-activation bound (pre-activation
-      interval spans zero, where the triangle relaxation is active and IBP
-      typically loses dependencies), and
-    - every neuron of the final layer (``"pre"`` for a LinearLayer,
-      ``"post"`` for a ReLULayer), so the bounds the safety check consumes
-      are refined directly.
+    By default, the selector targets every neuron of the final layer
+    (``"pre"`` for a LinearLayer, ``"post"`` for a ReLULayer) so the
+    output bounds consumed by the safety check are refined directly without
+    spending LP solves on hidden ReLU neurons whose static LP refinements do
+    not alter the final output bounds.
+
+    When ``include_hidden_relu=True``, the selector additionally includes
+    every hidden unstable ReLU neuron's post-activation bound (pre-activation
+    interval spans zero, where the triangle relaxation is active).
 
     The returned references are unique and ordered by layer index; they are
     directly consumable by :func:`verification.refinement.refine_neuron_bounds`
@@ -140,6 +144,8 @@ def select_refinement_targets(
         network: An extracted float64 MathematicalNetwork.
         intermediate_bounds: The IBP trace produced by
             ``get_intermediate_bounds`` for the queried region.
+        include_hidden_relu: Explicit opt-in flag to also include unstable
+            hidden ReLU ``"post"`` neurons. Defaults to ``False``.
 
     Returns:
         A tuple of unique NeuronRef targets (possibly empty for a network
@@ -155,6 +161,10 @@ def select_refinement_targets(
         raise TypeError(
             "intermediate_bounds must be an IntermediateBounds, "
             f"got {type(intermediate_bounds).__name__}"
+        )
+    if not isinstance(include_hidden_relu, bool):
+        raise TypeError(
+            f"include_hidden_relu must be a bool, got {type(include_hidden_relu).__name__}"
         )
     trace = intermediate_bounds
     if len(trace.layer_bounds) != len(network.layers):
@@ -172,13 +182,14 @@ def select_refinement_targets(
             seen.add(key)
             targets.append(neuron)
 
-    for index, layer in enumerate(network.layers):
-        entry = trace.layer_bounds[index]
-        if isinstance(layer, ReLULayer):
-            pre = entry.pre_activation_bounds
-            for j in range(pre.dimension):
-                if pre.lower[j] < 0.0 < pre.upper[j]:
-                    add(NeuronRef(index, "post", j))
+    if include_hidden_relu:
+        for index, layer in enumerate(network.layers):
+            entry = trace.layer_bounds[index]
+            if isinstance(layer, ReLULayer):
+                pre = entry.pre_activation_bounds
+                for j in range(pre.dimension):
+                    if pre.lower[j] < 0.0 < pre.upper[j]:
+                        add(NeuronRef(index, "post", j))
 
     if network.layers:
         last_index = len(network.layers) - 1
@@ -314,6 +325,8 @@ def verify_robustness_refined(
     region: InputRegion,
     target_class: int,
     target_neurons: tuple[NeuronRef, ...] | list[NeuronRef] | None = None,
+    *,
+    include_hidden_relu: bool = False,
 ) -> RefinedVerificationResult:
     """Run the complete Phase 3 workflow and return both verdicts plus diagnostics.
 
@@ -330,7 +343,11 @@ def verify_robustness_refined(
         target_class: Protected class index (non-negative integer).
         target_neurons: Optional explicit tuple/list of NeuronRef targets;
             when omitted, :func:`select_refinement_targets` chooses the
-            default set. An empty collection performs IBP-only verification.
+            default final-layer set. An empty collection performs IBP-only
+            verification.
+        include_hidden_relu: Explicit opt-in flag forwarded to
+            :func:`select_refinement_targets` when ``target_neurons`` is
+            omitted. Defaults to ``False``.
 
     Returns:
         A RefinedVerificationResult with the IBP verdict, the refinement
@@ -338,14 +355,24 @@ def verify_robustness_refined(
         refined verdict, and the refined downstream trace.
 
     Raises:
-        TypeError: If network, region, or target_class has the wrong type, or
-            target_neurons is not a tuple/list of NeuronRef.
+        TypeError: If network, region, target_class, or include_hidden_relu
+            has the wrong type, or target_neurons is not a tuple/list of
+            NeuronRef.
         ValueError: If the region dimension does not match the network, the
-            target class is out of range, a target reference is invalid, or
-            an accepted refinement fails the downstream validation of
-            ``propagate_with_refinements``.
+            target class is out of range, ``include_hidden_relu=True`` is
+            combined with explicit ``target_neurons``, a target reference is
+            invalid, or an accepted refinement fails the downstream validation
+            of ``propagate_with_refinements``.
     """
     _validate_query(network, region, target_class)
+    if not isinstance(include_hidden_relu, bool):
+        raise TypeError(
+            f"include_hidden_relu must be a bool, got {type(include_hidden_relu).__name__}"
+        )
+    if target_neurons is not None and include_hidden_relu:
+        raise ValueError(
+            "include_hidden_relu cannot be combined with explicit target_neurons"
+        )
 
     # Deferred imports: see the NOTE at module level. By the time this
     # function runs every import chain has completed, so the lazy imports
@@ -357,7 +384,11 @@ def verify_robustness_refined(
     ibp_result = _check(trace.output_bounds, target_class, region.radius)
 
     targets = (
-        select_refinement_targets(network, trace)
+        select_refinement_targets(
+            network,
+            trace,
+            include_hidden_relu=include_hidden_relu,
+        )
         if target_neurons is None
         else target_neurons
     )
