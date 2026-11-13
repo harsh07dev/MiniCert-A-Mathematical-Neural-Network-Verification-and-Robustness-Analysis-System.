@@ -43,7 +43,7 @@ integration (``solve_lp``) and the full refinement algorithm
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from numbers import Real
 from typing import Any, TypeAlias
@@ -313,7 +313,7 @@ class VariableLayout:
         return vector
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class LPProblem:
     """A Linear Program in ``scipy.optimize.linprog`` matrix form.
 
@@ -323,16 +323,23 @@ class LPProblem:
     maximization is expressed by negating the objective at solve time (the
     feasible set is identical for both directions).
 
+    Canonical SciPy CSC sparse constraint matrices (``A_ub_csc``, ``A_eq_csc``)
+    and an immutable ``(n, 2)`` solver bounds array (``bounds_array``) are
+    constructed once per ``LPProblem`` and reused unchanged across solves
+    with varying objectives. Dense read-only views remain available via
+    ``A_ub`` and ``A_eq``.
+
     Args:
         objective: Unit vector of length ``layout.total_variables``.
         objective_neuron: The neuron whose variable the objective selects.
         layout: The variable group offsets the matrices refer to.
         variable_bounds: Per-variable ``(lower, upper)`` pairs; ``None`` marks
-            an unbounded side. Interpreted directly as the ``bounds`` argument
-            of ``scipy.optimize.linprog``.
-        A_ub: Inequality constraint matrix of shape ``(m_ub, n)`` or ``None``.
+            an unbounded side.
+        A_ub: Inequality constraint matrix (dense array or SciPy sparse
+            matrix) of shape ``(m_ub, n)`` or ``None``.
         b_ub: Inequality right-hand side of shape ``(m_ub,)`` or ``None``.
-        A_eq: Equality constraint matrix of shape ``(m_eq, n)`` or ``None``.
+        A_eq: Equality constraint matrix (dense array or SciPy sparse matrix)
+            of shape ``(m_eq, n)`` or ``None``.
         b_eq: Equality right-hand side of shape ``(m_eq,)`` or ``None``.
 
     Raises:
@@ -346,48 +353,94 @@ class LPProblem:
     objective_neuron: NeuronRef
     layout: VariableLayout
     variable_bounds: tuple[tuple[float | None, float | None], ...]
-    A_ub: FloatArray | None = None
-    b_ub: FloatArray | None = None
-    A_eq: FloatArray | None = None
-    b_eq: FloatArray | None = None
+    b_ub: FloatArray | None
+    b_eq: FloatArray | None
+    A_ub_csc: Any = field(repr=False, compare=False)
+    A_eq_csc: Any = field(repr=False, compare=False)
+    bounds_array: FloatArray = field(repr=False, compare=False)
+    _A_ub_dense: FloatArray | None = field(repr=False, compare=False)
+    _A_eq_dense: FloatArray | None = field(repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.objective_neuron, NeuronRef):
+    def __init__(
+        self,
+        objective: Any,
+        objective_neuron: NeuronRef,
+        layout: VariableLayout,
+        variable_bounds: tuple[tuple[float | None, float | None], ...],
+        A_ub: Any = None,
+        b_ub: Any = None,
+        A_eq: Any = None,
+        b_eq: Any = None,
+    ) -> None:
+        if not isinstance(objective_neuron, NeuronRef):
             raise TypeError(
-                f"objective_neuron must be a NeuronRef, got {type(self.objective_neuron).__name__}"
+                f"objective_neuron must be a NeuronRef, got {type(objective_neuron).__name__}"
             )
-        layout = self.layout
         if not isinstance(layout, VariableLayout):
             raise TypeError(f"layout must be a VariableLayout, got {type(layout).__name__}")
         n = layout.total_variables
 
-        objective = _coerce_finite_vector(self.objective, "objective")
-        if objective.shape[0] != n:
-            raise ValueError(f"objective must have length {n}, got {objective.shape[0]}")
-        expected = layout.objective_vector(self.objective_neuron)
-        if not np.array_equal(objective, expected):
+        coerced_objective = _coerce_finite_vector(objective, "objective")
+        if coerced_objective.shape[0] != n:
+            raise ValueError(
+                f"objective must have length {n}, got {coerced_objective.shape[0]}"
+            )
+        expected = layout.objective_vector(objective_neuron)
+        if not np.array_equal(coerced_objective, expected):
             raise ValueError("objective must be the unit vector selecting objective_neuron")
 
-        variable_bounds = _coerce_variable_bounds(self.variable_bounds, n)
-        A_ub, b_ub = _coerce_constraint_pair(self.A_ub, self.b_ub, "A_ub", "b_ub", n)
-        A_eq, b_eq = _coerce_constraint_pair(self.A_eq, self.b_eq, "A_eq", "b_eq", n)
+        coerced_bounds = _coerce_variable_bounds(variable_bounds, n)
+        bounds_array = _coerce_bounds_array(coerced_bounds)
+        a_ub_dense, a_ub_csc, coerced_b_ub = _coerce_constraint_pair(
+            A_ub, b_ub, "A_ub", "b_ub", n
+        )
+        a_eq_dense, a_eq_csc, coerced_b_eq = _coerce_constraint_pair(
+            A_eq, b_eq, "A_eq", "b_eq", n
+        )
 
-        object.__setattr__(self, "objective", objective)
-        object.__setattr__(self, "variable_bounds", variable_bounds)
-        object.__setattr__(self, "A_ub", A_ub)
-        object.__setattr__(self, "b_ub", b_ub)
-        object.__setattr__(self, "A_eq", A_eq)
-        object.__setattr__(self, "b_eq", b_eq)
+        object.__setattr__(self, "objective", coerced_objective)
+        object.__setattr__(self, "objective_neuron", objective_neuron)
+        object.__setattr__(self, "layout", layout)
+        object.__setattr__(self, "variable_bounds", coerced_bounds)
+        object.__setattr__(self, "bounds_array", bounds_array)
+        object.__setattr__(self, "A_ub_csc", a_ub_csc)
+        object.__setattr__(self, "A_eq_csc", a_eq_csc)
+        object.__setattr__(self, "_A_ub_dense", a_ub_dense)
+        object.__setattr__(self, "_A_eq_dense", a_eq_dense)
+        object.__setattr__(self, "b_ub", coerced_b_ub)
+        object.__setattr__(self, "b_eq", coerced_b_eq)
+
+    @property
+    def A_ub(self) -> FloatArray | None:
+        """Read-only dense view of inequality constraints (cached on demand)."""
+        if self.A_ub_csc is None:
+            return None
+        if self._A_ub_dense is None:
+            dense = self.A_ub_csc.toarray()
+            dense.flags.writeable = False
+            object.__setattr__(self, "_A_ub_dense", dense)
+        return self._A_ub_dense
+
+    @property
+    def A_eq(self) -> FloatArray | None:
+        """Read-only dense view of equality constraints (cached on demand)."""
+        if self.A_eq_csc is None:
+            return None
+        if self._A_eq_dense is None:
+            dense = self.A_eq_csc.toarray()
+            dense.flags.writeable = False
+            object.__setattr__(self, "_A_eq_dense", dense)
+        return self._A_eq_dense
 
     @property
     def num_inequality_constraints(self) -> int:
         """Return the number of ``<=`` rows (0 when there are none)."""
-        return 0 if self.A_ub is None else int(self.A_ub.shape[0])
+        return 0 if self.A_ub_csc is None else int(self.A_ub_csc.shape[0])
 
     @property
     def num_equality_constraints(self) -> int:
         """Return the number of equality rows (0 when there are none)."""
-        return 0 if self.A_eq is None else int(self.A_eq.shape[0])
+        return 0 if self.A_eq_csc is None else int(self.A_eq_csc.shape[0])
 
 
 def _coerce_variable_bounds(
@@ -415,55 +468,155 @@ def _coerce_variable_bounds(
     return tuple(cleaned)
 
 
+def _coerce_bounds_array(
+    bounds: tuple[tuple[float | None, float | None], ...],
+) -> FloatArray:
+    """Convert validated variable bounds to a read-only ``(n, 2)`` float64 array."""
+    arr = np.empty((len(bounds), 2), dtype=np.float64)
+    for index, (lower, upper) in enumerate(bounds):
+        arr[index, 0] = -np.inf if lower is None else lower
+        arr[index, 1] = np.inf if upper is None else upper
+    arr.flags.writeable = False
+    return arr
+
+
+def _freeze_csc(matrix: Any) -> Any:
+    """Return a canonical sorted read-only SciPy CSC matrix copy."""
+    from scipy import sparse as sp
+
+    csc = sp.csc_matrix(matrix, dtype=np.float64, copy=True)
+    csc.sum_duplicates()
+    csc.sort_indices()
+    csc.data.flags.writeable = False
+    csc.indices.flags.writeable = False
+    csc.indptr.flags.writeable = False
+    return csc
+
+
 def _coerce_constraint_pair(
     A: object,
     b: object,
     a_name: str,
     b_name: str,
     n: int,
-) -> tuple[FloatArray | None, FloatArray | None]:
-    """Coerce one constraint matrix/rhs pair to independent read-only arrays."""
+) -> tuple[FloatArray | None, Any, FloatArray | None]:
+    """Coerce one constraint matrix/rhs pair to immutable CSC + optional dense."""
     if A is None and b is None:
-        return None, None
+        return None, None, None
     if A is None or b is None:
         raise ValueError(f"{a_name} and {b_name} must both be provided or both be None")
+
+    from scipy import sparse as sp
+
     try:
-        matrix = np.array(A, dtype=np.float64, copy=True)
         rhs = np.array(b, dtype=np.float64, copy=True)
     except (ValueError, TypeError) as exc:
         raise TypeError(
             f"{a_name} and {b_name} must be convertible to float64 arrays: {exc}"
         ) from exc
-    if matrix.ndim != 2:
-        raise ValueError(f"{a_name} must be 2-D, got shape {matrix.shape}")
-    if matrix.shape[1] != n:
-        raise ValueError(f"{a_name} must have {n} columns, got {matrix.shape[1]}")
-    if matrix.shape[0] == 0:
-        raise ValueError(
-            f"{a_name} must contain at least one row; pass None for an empty constraint set"
-        )
+
+    if sp.issparse(A):
+        if A.ndim != 2:
+            raise ValueError(f"{a_name} must be 2-D, got shape {A.shape}")
+        if A.shape[1] != n:
+            raise ValueError(f"{a_name} must have {n} columns, got {A.shape[1]}")
+        if A.shape[0] == 0:
+            raise ValueError(
+                f"{a_name} must contain at least one row; pass None for an empty constraint set"
+            )
+        if (
+            isinstance(A, sp.csc_matrix)
+            and A.dtype == np.float64
+            and not A.data.flags.writeable
+            and A.has_sorted_indices
+        ):
+            csc = A
+        else:
+            csc = _freeze_csc(A)
+        if np.any(np.isnan(csc.data)) or np.any(np.isinf(csc.data)):
+            raise ValueError(f"{a_name} coefficients must be finite")
+        dense: FloatArray | None = None
+        num_rows = int(csc.shape[0])
+    else:
+        try:
+            matrix = np.array(A, dtype=np.float64, copy=True)
+        except (ValueError, TypeError) as exc:
+            raise TypeError(
+                f"{a_name} and {b_name} must be convertible to float64 arrays: {exc}"
+            ) from exc
+        if matrix.ndim != 2:
+            raise ValueError(f"{a_name} must be 2-D, got shape {matrix.shape}")
+        if matrix.shape[1] != n:
+            raise ValueError(f"{a_name} must have {n} columns, got {matrix.shape[1]}")
+        if matrix.shape[0] == 0:
+            raise ValueError(
+                f"{a_name} must contain at least one row; pass None for an empty constraint set"
+            )
+        if np.any(np.isnan(matrix)) or np.any(np.isinf(matrix)):
+            raise ValueError(f"{a_name} coefficients must be finite")
+        matrix.flags.writeable = False
+        dense = matrix
+        csc = _freeze_csc(matrix)
+        num_rows = int(matrix.shape[0])
+
     if rhs.ndim != 1:
         raise ValueError(f"{b_name} must be 1-D, got shape {rhs.shape}")
-    if rhs.shape[0] != matrix.shape[0]:
+    if rhs.shape[0] != num_rows:
         raise ValueError(
-            f"{b_name} must have {matrix.shape[0]} entries, got {rhs.shape[0]}"
+            f"{b_name} must have {num_rows} entries, got {rhs.shape[0]}"
         )
-    if np.any(np.isnan(matrix)) or np.any(np.isinf(matrix)):
-        raise ValueError(f"{a_name} coefficients must be finite")
     if np.any(np.isnan(rhs)) or np.any(np.isinf(rhs)):
         raise ValueError(f"{b_name} must be finite")
-    matrix.flags.writeable = False
     rhs.flags.writeable = False
-    return matrix, rhs
+    return dense, csc, rhs
+
+
+def _rows_to_csc(
+    rows: list[tuple[dict[int, float], float]],
+    n_variables: int,
+) -> tuple[Any, FloatArray]:
+    """Assemble accumulated sparse row dicts directly into immutable CSC + RHS."""
+    from scipy import sparse as sp
+
+    row_indices: list[int] = []
+    col_indices: list[int] = []
+    values: list[float] = []
+    rhs = np.empty(len(rows), dtype=np.float64)
+    for row_idx, (coefficients, row_rhs) in enumerate(rows):
+        rhs[row_idx] = row_rhs
+        for col_idx, value in coefficients.items():
+            row_indices.append(row_idx)
+            col_indices.append(col_idx)
+            values.append(value)
+
+    csc = sp.coo_matrix(
+        (
+            np.asarray(values, dtype=np.float64),
+            (
+                np.asarray(row_indices, dtype=np.intp),
+                np.asarray(col_indices, dtype=np.intp),
+            ),
+        ),
+        shape=(len(rows), n_variables),
+        dtype=np.float64,
+    ).tocsc()
+    csc.sum_duplicates()
+    csc.sort_indices()
+    csc.data.flags.writeable = False
+    csc.indices.flags.writeable = False
+    csc.indptr.flags.writeable = False
+    rhs.flags.writeable = False
+    return csc, rhs
 
 
 class LPConstraintBuilder:
     """Accumulates linear constraints for one LP over a fixed variable vector.
 
-    The builder stores sparse rows internally and materializes dense float64
-    matrices in the :class:`LPProblem` returned by :meth:`build`. All rows are
-    written directly in the ``linprog`` orientation: equalities as
-    ``coefficients @ xi == rhs`` and inequalities as ``coefficients @ xi <= rhs``.
+    The builder stores sparse rows internally and materializes immutable CSC
+    sparse constraint matrices in the :class:`LPProblem` returned by
+    :meth:`build`. All rows are written directly in the ``linprog``
+    orientation: equalities as ``coefficients @ xi == rhs`` and inequalities
+    as ``coefficients @ xi <= rhs``.
 
     Args:
         n_variables: Total number of LP variables (columns).
@@ -706,19 +859,9 @@ class LPConstraintBuilder:
 
         A_ub = b_ub = A_eq = b_eq = None
         if self._ub_rows:
-            A_ub = np.zeros((len(self._ub_rows), self._n_variables), dtype=np.float64)
-            b_ub = np.zeros(len(self._ub_rows), dtype=np.float64)
-            for row, (coefficients, rhs) in enumerate(self._ub_rows):
-                for index, value in coefficients.items():
-                    A_ub[row, index] = value
-                b_ub[row] = rhs
+            A_ub, b_ub = _rows_to_csc(self._ub_rows, self._n_variables)
         if self._eq_rows:
-            A_eq = np.zeros((len(self._eq_rows), self._n_variables), dtype=np.float64)
-            b_eq = np.zeros(len(self._eq_rows), dtype=np.float64)
-            for row, (coefficients, rhs) in enumerate(self._eq_rows):
-                for index, value in coefficients.items():
-                    A_eq[row, index] = value
-                b_eq[row] = rhs
+            A_eq, b_eq = _rows_to_csc(self._eq_rows, self._n_variables)
 
         return LPProblem(
             objective=objective,

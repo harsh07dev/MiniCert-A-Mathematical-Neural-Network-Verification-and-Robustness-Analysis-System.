@@ -1247,3 +1247,102 @@ def test_wider_linear_only_network_negative_bias() -> None:
     for x in corners:
         _assert_concrete_execution_satisfies(problem0, network, x)
         _assert_concrete_execution_satisfies(problem1, network, x)
+
+
+def test_sparse_csc_matrices_and_reusable_bounds_array() -> None:
+    from scipy import sparse as sp
+
+    problem = _design_problem()
+
+    assert sp.isspmatrix_csc(problem.A_ub_csc)
+    assert sp.isspmatrix_csc(problem.A_eq_csc)
+    assert problem.A_ub_csc.shape == (3, 5)
+    assert problem.A_eq_csc.shape == (2, 5)
+    assert problem.A_ub_csc.has_sorted_indices
+    assert problem.A_eq_csc.has_sorted_indices
+    assert not problem.A_ub_csc.data.flags.writeable
+    assert not problem.A_eq_csc.data.flags.writeable
+    assert not problem.A_eq_csc.indices.flags.writeable
+    assert not problem.A_eq_csc.indptr.flags.writeable
+
+    np.testing.assert_array_equal(problem.A_ub_csc.toarray(), problem.A_ub)
+    np.testing.assert_array_equal(problem.A_eq_csc.toarray(), problem.A_eq)
+
+    assert problem.bounds_array.shape == (5, 2)
+    assert problem.bounds_array.dtype == np.float64
+    assert not problem.bounds_array.flags.writeable
+    expected_bounds = np.array(
+        [
+            [-1.0, 1.0],
+            [-1.0, 1.0],
+            [-2.0, 4.0],
+            [-2.0, 4.0],
+            [0.0, 4.0],
+        ],
+        dtype=np.float64,
+    )
+    np.testing.assert_array_equal(problem.bounds_array, expected_bounds)
+
+
+def test_lp_problem_sparse_and_dense_equivalence_and_unbounded_bounds_array() -> None:
+    from scipy import sparse as sp
+
+    layout = _design_layout()
+    neuron = NeuronRef(1, "post", 0)
+    objective = layout.objective_vector(neuron)
+    bounds = (
+        (None, 1.0),
+        (-1.0, None),
+        (None, None),
+        (-2.0, 4.0),
+        (0.0, 4.0),
+    )
+    dense_eq = np.array([[-1.0, 2.0, 1.0, 0.0, 0.0], [0.0, 0.0, -1.0, 1.0, 0.0]])
+    b_eq = np.array([1.0, 0.0])
+    dense_ub = np.array([[0.0, 0.0, 0.0, 0.0, -1.0]])
+    b_ub = np.array([0.0])
+
+    dense_prob = LPProblem(
+        objective, neuron, layout, bounds, A_ub=dense_ub, b_ub=b_ub, A_eq=dense_eq, b_eq=b_eq
+    )
+    sparse_prob = LPProblem(
+        objective,
+        neuron,
+        layout,
+        bounds,
+        A_ub=sp.csr_matrix(dense_ub),
+        b_ub=b_ub,
+        A_eq=sp.csc_matrix(dense_eq),
+        b_eq=b_eq,
+    )
+
+    np.testing.assert_array_equal(sparse_prob.A_ub_csc.toarray(), dense_prob.A_ub_csc.toarray())
+    np.testing.assert_array_equal(sparse_prob.A_eq_csc.toarray(), dense_prob.A_eq_csc.toarray())
+    np.testing.assert_array_equal(sparse_prob.A_ub, dense_ub)
+    np.testing.assert_array_equal(sparse_prob.A_eq, dense_eq)
+    np.testing.assert_array_equal(
+        sparse_prob.bounds_array,
+        np.array(
+            [
+                [-np.inf, 1.0],
+                [-1.0, np.inf],
+                [-np.inf, np.inf],
+                [-2.0, 4.0],
+                [0.0, 4.0],
+            ],
+            dtype=np.float64,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must have 5 columns"):
+        LPProblem(
+            objective,
+            neuron,
+            layout,
+            bounds,
+            A_eq=sp.csc_matrix(np.ones((1, 4))),
+            b_eq=np.zeros(1),
+        )
+    with pytest.raises(ValueError, match="must be finite"):
+        bad_sparse = sp.csc_matrix(np.array([[np.nan, 0.0, 0.0, 0.0, 0.0]]))
+        LPProblem(objective, neuron, layout, bounds, A_eq=bad_sparse, b_eq=np.zeros(1))

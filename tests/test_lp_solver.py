@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
 from abstract_domain.bounds import NeuronRef
 from verification.lp import LPProblem, VariableLayout
@@ -28,6 +29,7 @@ from verification.lp_solver import (
     LPSolverResult,
     LPSolverStatus,
     _duality_gap_diagnostics,
+    _linear_row_violations,
     _primal_residual_diagnostics,
     solve_lp,
 )
@@ -1119,3 +1121,161 @@ def test_unvalidated_results_never_expose_certified_bound() -> None:
         )
         assert res.is_certified is False
         assert res.certified_bound is None
+
+
+def test_repeated_solves_reuse_sparse_matrices_and_swap_objectives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scipy.optimize
+    from scipy import sparse as sp
+
+    problem = _make_problem(
+        a_ub=[[1.0, 1.0], [-1.0, 0.0]],
+        b_ub=[3.0, 0.0],
+        a_eq=[[1.0, -2.0]],
+        b_eq=[0.0],
+        bounds=[(0.0, None), (0.0, 2.0)],
+    )
+
+    seen_calls: list[dict[str, object]] = []
+    real_linprog = scipy.optimize.linprog
+
+    def spy_linprog(*args, **kwargs):
+        seen_calls.append(kwargs)
+        return real_linprog(*args, **kwargs)
+
+    monkeypatch.setattr(scipy.optimize, "linprog", spy_linprog)
+
+    res_min_x = solve_lp(problem, [1.0, 0.0], maximize=False)
+    res_max_x = solve_lp(problem, [1.0, 0.0], maximize=True)
+    res_min_y = solve_lp(problem, [0.0, 1.0], maximize=False)
+    res_max_y = solve_lp(problem, [0.0, 1.0], maximize=True)
+
+    assert len(seen_calls) == 4
+    for call_kwargs in seen_calls:
+        assert sp.isspmatrix_csc(call_kwargs["A_ub"])
+        assert sp.isspmatrix_csc(call_kwargs["A_eq"])
+        assert call_kwargs["A_ub"] is problem.A_ub_csc
+        assert call_kwargs["A_eq"] is problem.A_eq_csc
+        assert call_kwargs["bounds"] is problem.bounds_array
+
+    # x = 2y and x + y <= 3, y >= 0, y <= 2 -> x in [0, 2], y in [0, 1].
+    assert res_min_x.is_certified and res_max_x.is_certified
+    assert res_min_y.is_certified and res_max_y.is_certified
+    assert res_min_x.certified_bound == pytest.approx(0.0, abs=1e-9)
+    assert res_max_x.certified_bound == pytest.approx(2.0, abs=1e-9)
+    assert res_min_y.certified_bound == pytest.approx(0.0, abs=1e-9)
+    assert res_max_y.certified_bound == pytest.approx(1.0, abs=1e-9)
+
+
+def test_sparse_lp_preserves_infeasible_and_unvalidated_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scipy.optimize
+
+    infeasible = _make_problem(
+        a_ub=[[1.0, 0.0], [-1.0, 0.0]],
+        b_ub=[0.5, -1.0],
+        bounds=[(0.0, 2.0), (0.0, 2.0)],
+    )
+    inf_res = solve_lp(infeasible, [1.0, 0.0])
+    assert inf_res.status is INFEASIBLE
+    assert inf_res.is_certified is False
+    assert inf_res.certified_bound is None
+
+    feasible = _make_problem(
+        a_ub=[[1.0, 1.0]],
+        b_ub=[2.0],
+        bounds=[(0.0, 2.0), (0.0, 2.0)],
+    )
+    monkeypatch.setattr(
+        scipy.optimize,
+        "linprog",
+        lambda *a, **k: _fake_result(
+            [1.0, 1.0],
+            fun=1.0,
+            y=[-1.0],
+            lam_lb=[0.0, 0.0],
+            lam_ub=[0.0, 0.0],
+        ),
+    )
+    unval = solve_lp(feasible, [1.0, 0.0])
+    assert unval.status is OPTIMAL
+    assert unval.validation_status is UNVALIDATED
+    assert unval.is_certified is False
+    assert unval.certified_bound is None
+
+
+# --------------------------------------------------------------------------
+# Optimization 3: vectorized row & bound validation (dense and sparse CSC)
+# --------------------------------------------------------------------------
+
+def test_linear_row_violations_sparse_matches_dense() -> None:
+    """Vectorized sparse CSC row violations match dense NumPy results."""
+    rng = np.random.default_rng(7)
+    a_dense = rng.standard_normal((8, 4))
+    b = rng.standard_normal(8)
+    x = rng.standard_normal(4)
+    a_csc = sp.csc_matrix(a_dense)
+
+    for eq in (False, True):
+        assert _linear_row_violations(a_dense, b, x, equality=eq) == pytest.approx(
+            _linear_row_violations(a_csc, b, x, equality=eq), rel=1e-12
+        )
+
+
+def test_linear_row_violations_satisfied_and_empty() -> None:
+    """No violated rows or empty variable vector returns zero violations."""
+    a_csc = sp.csc_matrix(np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float64))
+    b = np.array([1.0, 1.0], dtype=np.float64)
+    x = np.array([0.5, 0.5], dtype=np.float64)
+    assert _linear_row_violations(a_csc, b, x, equality=False) == (0.0, 0.0, 0.0)
+    assert _linear_row_violations(
+        np.zeros((0, 0), dtype=np.float64),
+        np.zeros(0, dtype=np.float64),
+        np.zeros(0, dtype=np.float64),
+        equality=False,
+    ) == (0.0, 0.0, 0.0)
+
+
+def test_primal_residual_diagnostics_vectorized_bounds_and_csc() -> None:
+    """Vectorized bounds_array + CSC checks detect lower, upper, and infinite bounds."""
+    prob_bounds = _make_problem(bounds=[(0.5, 1.0), (0.0, 0.3)])
+    assert _primal_residual_diagnostics(
+        prob_bounds, np.array([0.2, 0.1], dtype=np.float64)
+    ).raw_residual == pytest.approx(0.3)
+    assert _primal_residual_diagnostics(
+        prob_bounds, np.array([0.6, 0.8], dtype=np.float64)
+    ).raw_residual == pytest.approx(0.5)
+
+    prob_inf = _make_problem(bounds=[(None, None), (None, None)])
+    assert _primal_residual_diagnostics(
+        prob_inf, np.array([1e10, -1e10], dtype=np.float64)
+    ).raw_residual == pytest.approx(0.0)
+
+    prob_eq = _make_problem(a_eq=[[1.0, 1.0]], b_eq=[1.0])
+    assert _primal_residual_diagnostics(
+        prob_eq, np.array([1.0, 1.0], dtype=np.float64)
+    ).raw_residual == pytest.approx(1.0)
+
+
+def test_dual_diagnostics_vectorized_unbounded_and_equality() -> None:
+    """Vectorized _dual_diagnostics handles infinite bounds and equality-only LPs."""
+    prob_mixed = _make_problem(
+        a_ub=[[0.0, 1.0]],
+        b_ub=[2.0],
+        bounds=[(None, None), (0.0, None)],
+    )
+    res_mixed = solve_lp(prob_mixed, [0.0, -1.0])
+    assert res_mixed.status is OPTIMAL
+    assert res_mixed.validation_status is VALIDATED
+    assert res_mixed.certified_bound == pytest.approx(-2.0, abs=1e-6)
+
+    prob_eq = _make_problem(
+        a_eq=[[1.0, 1.0]],
+        b_eq=[1.0],
+        bounds=[(0.0, None), (None, None)],
+    )
+    res_eq = solve_lp(prob_eq, [1.0, 0.0])
+    assert res_eq.status is OPTIMAL
+    assert res_eq.validation_status is VALIDATED

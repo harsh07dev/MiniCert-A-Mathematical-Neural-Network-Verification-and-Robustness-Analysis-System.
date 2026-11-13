@@ -448,32 +448,50 @@ class _DualDiagnostics:
         return max(self.stationarity_violation, self.sign_violation)
 
 
+def _to_1d_float(array: Any) -> NDArray[np.float64]:
+    """Flatten dense, matrix, or sparse-output vectors to a 1-D float64 array."""
+    if hasattr(array, "A1"):
+        array = array.A1
+    return np.asarray(array, dtype=np.float64).ravel()
+
+
 def _linear_row_violations(
-    matrix: FloatArray,
+    matrix: Any,
     rhs: FloatArray,
     x: FloatArray,
     *,
     equality: bool,
 ) -> tuple[float, float, float]:
-    """Return ``(max_raw, max_normalized, max_unit_row)`` linear row violations."""
-    diff = matrix @ x - rhs
-    abs_x = np.abs(x)
-    max_raw = 0.0
-    max_norm = 0.0
-    max_unit_row = 0.0
-    for index, raw_signed in enumerate(diff):
-        raw = abs(float(raw_signed)) if equality else float(raw_signed)
-        if raw <= 0.0:
-            continue
-        abs_row = np.abs(matrix[index])
-        row_norm = float(np.sum(abs_row))
-        row_abs_dot = float(abs_row @ abs_x) if x.size else 0.0
-        local_scale = max(1.0, row_abs_dot, abs(float(rhs[index])))
-        coeff_scale = max(1.0, row_norm)
-        max_raw = max(max_raw, raw)
-        max_norm = max(max_norm, raw / local_scale)
-        max_unit_row = max(max_unit_row, raw / coeff_scale)
-    return max_raw, max_norm, max_unit_row
+    """Return ``(max_raw, max_normalized, max_unit_row)`` linear row violations.
+
+    Accepts both dense ``numpy.ndarray`` and SciPy sparse matrices.  All
+    per-row work is replaced by vectorised NumPy/sparse operations so only
+    *violated* rows contribute to the final ``max`` reduction.
+    """
+    if x.size == 0:
+        return 0.0, 0.0, 0.0
+
+    diff = _to_1d_float(matrix @ x) - _to_1d_float(rhs)
+    violation = np.abs(diff) if equality else np.maximum(diff, 0.0)
+
+    mask = violation > 0.0
+    if not np.any(mask):
+        return 0.0, 0.0, 0.0
+
+    abs_matrix = np.abs(matrix)
+    row_abs_dot = _to_1d_float(abs_matrix @ np.abs(x))
+    row_norm = _to_1d_float(abs_matrix.sum(axis=1))
+    rhs_flat = _to_1d_float(rhs)
+
+    v = violation[mask]
+    local_scale = np.maximum(1.0, np.maximum(row_abs_dot[mask], np.abs(rhs_flat[mask])))
+    coeff_scale = np.maximum(1.0, row_norm[mask])
+
+    return (
+        float(np.max(v)),
+        float(np.max(v / local_scale)),
+        float(np.max(v / coeff_scale)),
+    )
 
 
 def _primal_residual_diagnostics(
@@ -489,35 +507,29 @@ def _primal_residual_diagnostics(
     max_norm = 0.0
     max_unit_row = 0.0
 
-    if problem.A_ub is not None and problem.b_ub is not None:
-        raw, norm, unit_row = _linear_row_violations(
-            problem.A_ub, problem.b_ub, x, equality=False
-        )
-        max_raw = max(max_raw, raw)
-        max_norm = max(max_norm, norm)
-        max_unit_row = max(max_unit_row, unit_row)
-
-    if problem.A_eq is not None and problem.b_eq is not None:
-        raw, norm, unit_row = _linear_row_violations(
-            problem.A_eq, problem.b_eq, x, equality=True
-        )
-        max_raw = max(max_raw, raw)
-        max_norm = max(max_norm, norm)
-        max_unit_row = max(max_unit_row, unit_row)
-
-    for index, (lower, upper) in enumerate(problem.variable_bounds):
-        value = float(x[index])
-        if lower is not None and value < lower:
-            raw = lower - value
-            local_scale = max(1.0, abs(lower), abs(value))
+    for matrix, rhs, is_eq in (
+        (problem.A_ub_csc, problem.b_ub, False),
+        (problem.A_eq_csc, problem.b_eq, True),
+    ):
+        if matrix is not None and rhs is not None:
+            raw, norm, unit_row = _linear_row_violations(matrix, rhs, x, equality=is_eq)
             max_raw = max(max_raw, raw)
-            max_norm = max(max_norm, raw / local_scale)
-            max_unit_row = max(max_unit_row, raw)
-        if upper is not None and value > upper:
-            raw = value - upper
-            local_scale = max(1.0, abs(upper), abs(value))
+            max_norm = max(max_norm, norm)
+            max_unit_row = max(max_unit_row, unit_row)
+
+    # bounds_array is (n, 2) float64 with -inf / +inf for absent bounds.
+    ba = problem.bounds_array
+    lb, ub = ba[:, 0], ba[:, 1]
+    xf = np.asarray(x, dtype=np.float64).ravel()
+
+    for viol, bound in ((np.maximum(0.0, lb - xf), lb), (np.maximum(0.0, xf - ub), ub)):
+        mask = viol > 0.0
+        if np.any(mask):
+            masked_viol = viol[mask]
+            scale = np.maximum(1.0, np.maximum(np.abs(bound[mask]), np.abs(xf[mask])))
+            raw = float(np.max(masked_viol))
             max_raw = max(max_raw, raw)
-            max_norm = max(max_norm, raw / local_scale)
+            max_norm = max(max_norm, float(np.max(masked_viol / scale)))
             max_unit_row = max(max_unit_row, raw)
 
     return _PrimalResidualDiagnostics(
@@ -617,22 +629,32 @@ def _dual_diagnostics(
 
     # Stationarity: A_ub.T y + A_eq.T nu + lambda_lb + lambda_ub == objective,
     # with lambda forced to zero on unbounded variable sides.
+    # Use CSC matrices directly to avoid triggering dense materialisation.
     gradient = np.zeros(n, dtype=np.float64)
     if m_ub:
-        gradient += problem.A_ub.T @ y
+        g_ub = problem.A_ub_csc.T @ y
+        gradient += np.asarray(g_ub, dtype=np.float64).ravel()
     if m_eq:
-        gradient += problem.A_eq.T @ nu
-    lambda_lb_used = lambda_lb.copy()
-    lambda_ub_used = lambda_ub.copy()
-    for index, (lower, upper) in enumerate(problem.variable_bounds):
-        if lower is None:
-            lambda_lb_used[index] = 0.0
-        else:
-            dual += float(lower) * float(lambda_lb[index])
-        if upper is None:
-            lambda_ub_used[index] = 0.0
-        else:
-            dual += float(upper) * float(lambda_ub[index])
+        g_eq = problem.A_eq_csc.T @ nu
+        gradient += np.asarray(g_eq, dtype=np.float64).ravel()
+
+    # Vectorised bounds accumulation using bounds_array (n, 2) float64.
+    ba = problem.bounds_array   # (n, 2); -inf/+inf where bound is absent
+    lb = ba[:, 0]
+    ub = ba[:, 1]
+    fin_lb = np.isfinite(lb)
+    fin_ub = np.isfinite(ub)
+
+    # Zero lambda where the corresponding bound is absent (unbounded side).
+    lambda_lb_used = np.where(fin_lb, lambda_lb, 0.0)
+    lambda_ub_used = np.where(fin_ub, lambda_ub, 0.0)
+
+    # Dual objective contribution from finite bounds.
+    if np.any(fin_lb):
+        dual += float(np.dot(lb[fin_lb], lambda_lb[fin_lb]))
+    if np.any(fin_ub):
+        dual += float(np.dot(ub[fin_ub], lambda_ub[fin_ub]))
+
     gradient += lambda_lb_used + lambda_ub_used
 
     residual = gradient - objective
@@ -795,13 +817,12 @@ def solve_lp(
             f"scipy is required to solve LPs: {exc}",
         )
 
-    bounds = list(problem.variable_bounds)
-    kwargs: dict[str, Any] = {"bounds": bounds}
-    # Normalize empty matrices away: linprog prefers None over 0-row arrays.
+    kwargs: dict[str, Any] = {"bounds": problem.bounds_array}
+    # Normalize empty matrices away: linprog prefers None over 0-row matrices.
     if problem.num_inequality_constraints:
-        kwargs["A_ub"], kwargs["b_ub"] = problem.A_ub, problem.b_ub
+        kwargs["A_ub"], kwargs["b_ub"] = problem.A_ub_csc, problem.b_ub
     if problem.num_equality_constraints:
-        kwargs["A_eq"], kwargs["b_eq"] = problem.A_eq, problem.b_eq
+        kwargs["A_eq"], kwargs["b_eq"] = problem.A_eq_csc, problem.b_eq
     if options:
         kwargs["options"] = dict(options)
 
