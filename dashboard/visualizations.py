@@ -17,17 +17,17 @@ try:
 except ImportError:  # pragma: no cover - exercised only without matplotlib
     plt = None  # type: ignore[assignment]
 
-COLOR_BASELINE = "#4C9BE8"
-COLOR_REFINED = "#F28E5B"
-COLOR_LP = "#62C370"
-COLOR_IMPROVEMENT = "#62C370"
-COLOR_NEGATIVE = "#E06C75"
-COLOR_ZERO = "#56B4E9"
-TEXT_COLOR = "#EAEAEA"
-MUTED_TEXT_COLOR = "#B8B8B8"
-MISSING_COLOR = "#9E9E9E"
-GRID_COLOR = "#515151"
-SPINE_COLOR = "#8C8C8C"
+COLOR_BASELINE = "#786B67"
+COLOR_REFINED = "#702B3A"
+COLOR_LP = "#627D68"
+COLOR_IMPROVEMENT = "#627D68"
+COLOR_NEGATIVE = "#963E50"
+COLOR_ZERO = "#A7793D"
+TEXT_COLOR = "#30282A"
+MUTED_TEXT_COLOR = "#827875"
+MISSING_COLOR = "#827875"
+GRID_COLOR = "#E5DCD3"
+SPINE_COLOR = "#C9BEB5"
 FIGURE_SIZE = (8.0, 4.6)
 
 
@@ -37,7 +37,7 @@ def _figure() -> Any:
     figure, axis = plt.subplots(figsize=FIGURE_SIZE, dpi=120)
     figure.patch.set_alpha(0)
     axis.set_facecolor("none")
-    axis.grid(True, color=GRID_COLOR, linewidth=0.6, alpha=0.65)
+    axis.grid(True, color=GRID_COLOR, linewidth=0.65, alpha=0.9)
     axis.set_axisbelow(True)
     for spine in axis.spines.values():
         spine.set_color(SPINE_COLOR)
@@ -390,16 +390,7 @@ def plot_improvement(series: Sequence[dict[str, Any]]) -> Any:
 # Multi-Experiment Comparison Plots
 # ==============================================================================
 
-EXP_PALETTE = (
-    "#4C9BE8",  # Blue
-    "#F28E5B",  # Orange
-    "#62C370",  # Green
-    "#B388FF",  # Purple
-    "#FFD166",  # Yellow
-    "#EF476F",  # Red
-    "#118AB2",  # Cyan
-    "#06D6A0",  # Teal
-)
+EXP_PALETTE = ("#702B3A", "#627D68", "#A7793D", "#596F83", "#963E50", "#6C626A", "#8C765C", "#455D50")
 
 
 def _comparison_figure_setup(
